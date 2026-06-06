@@ -2,7 +2,7 @@
 Nexus Analyst — capa NL→SQL sobre cualquier caso Nexus.
 
 No está hardcodeada a ningún caso. Lee el schema de la DB,
-detecta qué tablas tienen datos, y entrena Vanna con contexto
+detecta qué tablas tienen datos, y construye el contexto
 forense relevante para esas tablas.
 """
 
