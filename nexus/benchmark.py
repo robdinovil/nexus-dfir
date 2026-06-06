@@ -1,12 +1,23 @@
 """
 Nexus Benchmark — mide calidad de NL→SQL y tasa de alucinaciones.
 
-Métricas:
-  - Score general (PASS/FAIL)
-  - Hallucination rate: alucinaciones que el validador NO pudo corregir
-  - Self-correction rate: alucinaciones detectadas Y auto-corregidas por el validador
-  - Latency: avg, p95, total
-  - Por categoría: enumeration, user_activity, network, timeline, processes,
+Métricas implementadas:
+  Score / Hallucination / Self-correction / Latency
+    (propias de Nexus)
+
+  TUS — Task-level Understanding Score [DFIR-Metric, arxiv 2505.19973]
+    4 criterios por pregunta → 0.0-1.0 (vs binario PASS/FAIL)
+    C1: tablas correctas  C2: columnas correctas
+    C3: filtros correctos C4: resultado en rango esperado
+
+  RS — Reliability Score [DFIR-Metric]
+    +1 correcto / -2 incorrecto / 0 skip → normalizado 0.0-1.0
+
+  CCR — Context Recall (NonLLM) [RAGAS adaptado, sin LLM]
+    % de términos clave recuperados por BM25 antes de la generación
+    Mide calidad del retriever independientemente del LLM
+
+  Categorías: enumeration, user_activity, network, timeline, processes,
     cross_table, persistence, anomaly, attribution, meta
 """
 
@@ -308,6 +319,8 @@ class QuestionResult:
     self_corrected: bool                 # alucinó pero el validador lo arregló
     issues: list[str]
     elapsed_s: float
+    tus_score: float = 0.0               # TUS: 0.0-1.0 (DFIR-Metric)
+    context_recall: float = 1.0          # CCR: BM25 retrieval coverage (RAGAS NonLLM)
 
 
 @dataclass
@@ -329,7 +342,7 @@ class BenchmarkReport:
 
     @property
     def hallucination_rate(self) -> float:
-        """Tasa de alucinaciones NO resueltas (las que causaron FAIL)."""
+        """Alucinaciones NO resueltas / total."""
         total_h = sum(self.hallucinations.values())
         return total_h / self.total if self.total > 0 else 0.0
 
@@ -340,6 +353,29 @@ class BenchmarkReport:
         if total_triggered == 0:
             return 1.0
         return self.self_corrections / total_triggered
+
+    @property
+    def tus_avg(self) -> float:
+        """TUS promedio — Task-level Understanding Score [DFIR-Metric]."""
+        if not self.results:
+            return 0.0
+        return sum(r.tus_score for r in self.results) / len(self.results)
+
+    @property
+    def reliability_score(self) -> float:
+        """RS normalizado 0-1: +1 correcto / -2 incorrecto [DFIR-Metric]."""
+        if not self.results:
+            return 0.0
+        rs_raw = sum(1 if r.passed else -2 for r in self.results)
+        # mapea [-2N, N] → [0, 1]
+        return (rs_raw + 2 * len(self.results)) / (3 * len(self.results))
+
+    @property
+    def context_recall_avg(self) -> float:
+        """CCR promedio — NonLLM Context Recall del retriever BM25 [RAGAS adaptado]."""
+        if not self.results:
+            return 0.0
+        return sum(r.context_recall for r in self.results) / len(self.results)
 
     @property
     def avg_latency(self) -> float:
@@ -354,6 +390,68 @@ class BenchmarkReport:
         times = sorted(r.elapsed_s for r in self.results)
         idx = int(len(times) * 0.95)
         return times[min(idx, len(times) - 1)]
+
+
+# ── TUS / RS / CCR helpers ────────────────────────────────────────────────────
+
+def _compute_tus(q: dict, sql_lower: str, rows: int | None) -> float:
+    """
+    Task-level Understanding Score — 4 criterios binarios, promedio → 0.0-1.0.
+    Fuente: DFIR-Metric (arxiv 2505.19973), adaptado para NL→SQL.
+    """
+    scores: list[float] = []
+
+    # C1: tablas correctas — applies_to tables presentes en FROM/JOIN
+    tables = q.get("applies_to", [])
+    if tables:
+        scores.append(float(all(t in sql_lower for t in tables)))
+
+    # C2: columnas objetivo — expected_cols en SELECT o WHERE
+    cols = q.get("expected_cols", [])
+    if cols:
+        scores.append(float(all(c.lower() in sql_lower for c in cols)))
+
+    # C3: filtros/keywords — fracción de must_contain presentes
+    mc = q.get("must_contain", [])
+    if mc:
+        scores.append(sum(1 for kw in mc if kw.lower() in sql_lower) / len(mc))
+
+    # C4: resultado en rango esperado
+    min_r = q.get("min_rows")
+    max_r = q.get("max_rows")
+    if rows is not None and (min_r is not None or max_r is not None):
+        c4 = (min_r is None or rows >= min_r) and (max_r is None or rows <= max_r)
+        scores.append(float(c4))
+
+    return sum(scores) / len(scores) if scores else 0.0
+
+
+def _compute_context_recall(question: str, q: dict, analyst) -> float:
+    """
+    NonLLM Context Recall — % de términos clave presentes en top-5 docs BM25.
+    Mide si el retriever recuperó lo necesario para responder la pregunta.
+    Fuente: RAGAS NonLLMContextRecall, adaptado sin LLM judge.
+    """
+    from .vectorstore import _bm25_scores
+
+    needed: set[str] = set()
+    needed.update(q.get("applies_to", []))
+    needed.update(c.lower() for c in q.get("expected_cols", []) if c)
+    needed.update(kw.lower() for kw in q.get("must_contain", []))
+    needed.discard("")
+
+    if not needed:
+        return 1.0
+
+    all_docs = analyst._store.get_all_docs()
+    if not all_docs:
+        return 0.0
+
+    scores = _bm25_scores(question, all_docs)
+    ranked = sorted(zip(scores, all_docs), key=lambda x: x[0], reverse=True)
+    top5 = " ".join(doc.lower() for _, doc in ranked[:5])
+
+    return sum(1 for term in needed if term in top5) / len(needed)
 
 
 def run(db_path: str, model: str = "qwen2.5:7b-instruct",
@@ -433,6 +531,10 @@ def run(db_path: str, model: str = "qwen2.5:7b-instruct",
 
         passed = len(issues) == 0 and err is None
 
+        # Métricas adicionales (sin LLM)
+        tus   = _compute_tus(q, sql_lower, rows)
+        ccr   = _compute_context_recall(q["question"], q, analyst)
+
         status_str = f"{GREEN}PASS{RESET}" if passed else f"{RED}FAIL{RESET}"
 
         # Alucinación display: mostrar first_h si se auto-corrigió (success story)
@@ -449,6 +551,7 @@ def run(db_path: str, model: str = "qwen2.5:7b-instruct",
             sql_generated=sql, rows_returned=rows, passed=passed,
             hallucination_type=h, first_hallucination_type=first_h,
             self_corrected=self_corrected, issues=issues, elapsed_s=elapsed,
+            tus_score=tus, context_recall=ccr,
         ))
 
     analyst.close()
@@ -507,15 +610,21 @@ def _print_summary(r: BenchmarkReport) -> None:
 
     score_color = GREEN if r.score >= 0.8 else YELLOW if r.score >= 0.6 else RED
     sc_color    = GREEN if r.self_correction_rate >= 0.7 else YELLOW
+    tus_color   = GREEN if r.tus_avg >= 0.8 else YELLOW if r.tus_avg >= 0.6 else RED
+    rs_color    = GREEN if r.reliability_score >= 0.8 else YELLOW if r.reliability_score >= 0.6 else RED
+    ccr_color   = GREEN if r.context_recall_avg >= 0.8 else YELLOW
 
     h_total = sum(r.hallucinations.values())
 
     print(f"\n{CYAN}{BOLD}{'─'*65}{RESET}")
     print(f"{CYAN}{BOLD}  RESUMEN{RESET}")
-    print(f"  Score general       : {score_color}{BOLD}{r.passed}/{r.total} ({r.score:.0%}){RESET}")
-    print(f"  Alucinaciones       : {h_total} no-resueltas  "
-          f"({r.hallucinations['structural']} structural, "
-          f"{r.hallucinations['referential']} referential, "
+    print(f"  Score  (PASS/FAIL)  : {score_color}{BOLD}{r.passed}/{r.total} ({r.score:.0%}){RESET}")
+    print(f"  TUS    (0-1.0)      : {tus_color}{BOLD}{r.tus_avg:.3f}{RESET}  ← partial credit [DFIR-Metric]")
+    print(f"  RS     (0-1.0)      : {rs_color}{BOLD}{r.reliability_score:.3f}{RESET}  ← +1 correct / -2 wrong [DFIR-Metric]")
+    print(f"  CCR    (0-1.0)      : {ccr_color}{BOLD}{r.context_recall_avg:.3f}{RESET}  ← BM25 retrieval coverage [RAGAS NonLLM]")
+    print(f"  Halluc (no resuelto): {h_total}  "
+          f"({r.hallucinations['structural']} struct / "
+          f"{r.hallucinations['referential']} ref / "
           f"{r.hallucinations['syntax']} syntax)")
     print(f"  Auto-correcciones   : {sc_color}{r.self_corrections} "
           f"({r.self_correction_rate:.0%} de las detectadas){RESET}")
@@ -546,9 +655,16 @@ def _save_json(r: BenchmarkReport, path: str) -> None:
     data = {
         "db": r.db_path,
         "model": r.model,
+        # ── Nexus métricas propias ─────────────────────────────────────────
         "score": round(r.score, 3),
         "hallucination_rate": round(r.hallucination_rate, 3),
         "self_correction_rate": round(r.self_correction_rate, 3),
+        # ── DFIR-Metric (arxiv 2505.19973) ────────────────────────────────
+        "tus_avg": round(r.tus_avg, 3),
+        "reliability_score": round(r.reliability_score, 3),
+        # ── RAGAS NonLLM Context Recall ────────────────────────────────────
+        "context_recall_avg": round(r.context_recall_avg, 3),
+        # ── Latencia ──────────────────────────────────────────────────────
         "avg_latency_s": round(r.avg_latency, 1),
         "p95_latency_s": round(r.p95_latency, 1),
         "elapsed_total_s": r.elapsed_total_s,
@@ -562,6 +678,8 @@ def _save_json(r: BenchmarkReport, path: str) -> None:
                 "question": res.question,
                 "category": res.category,
                 "passed": res.passed,
+                "tus_score": round(res.tus_score, 3),
+                "context_recall": round(res.context_recall, 3),
                 "hallucination_type": res.hallucination_type,
                 "first_hallucination_type": res.first_hallucination_type,
                 "self_corrected": res.self_corrected,
