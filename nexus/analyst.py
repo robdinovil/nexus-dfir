@@ -380,18 +380,23 @@ class NexusAnalyst:
 
         if not sql:
             return {"question": question, "sql": None, "result": None,
-                    "error": "LLM no generó SQL válido", "hallucination": None}
+                    "error": "LLM no generó SQL válido", "hallucination": None,
+                    "retried": False, "self_corrected": False,
+                    "first_hallucination_type": None}
 
         # Validar antes de ejecutar
         validation = validate(sql, self.conn)
+        first_hallucination_type = None
+        retried = False
 
         if not validation.valid:
+            first_hallucination_type = validation.hallucination_type
+            retried = True
             hint = build_correction_hint(validation, self.conn)
             if verbose:
                 print(f"  {YELLOW}[{validation.hallucination_type}] Alucinación detectada:{RESET} {hint}")
                 print(f"  {CYAN}Reintentando con corrección...{RESET}")
 
-            # Retry con el error como contexto adicional
             correction_prompt = (
                 self._build_prompt(question) +
                 f"\n\nPREVIOUS ATTEMPT FAILED: {hint}\n"
@@ -404,7 +409,11 @@ class NexusAnalyst:
             if not validation.valid and verbose:
                 print(f"  {RED}Retry falló también: {validation.error_summary}{RESET}")
 
+        self_corrected = retried and validation.valid
+
         if verbose:
+            if self_corrected:
+                print(f"  {GREEN}✓ Auto-corregido{RESET}")
             attempt_label = "" if validation.valid else f" {YELLOW}[con errores]{RESET}"
             print(f"  {GREEN}SQL generado{attempt_label}:{RESET}")
             for line in sql.strip().splitlines():
@@ -427,6 +436,9 @@ class NexusAnalyst:
             return {
                 "question": question, "sql": sql, "result": df, "error": None,
                 "hallucination": validation.hallucination_type,
+                "retried": retried,
+                "self_corrected": self_corrected,
+                "first_hallucination_type": first_hallucination_type,
             }
         except Exception as e:
             if verbose:
@@ -434,6 +446,9 @@ class NexusAnalyst:
             return {
                 "question": question, "sql": sql, "result": None, "error": str(e),
                 "hallucination": validation.hallucination_type,
+                "retried": retried,
+                "self_corrected": self_corrected,
+                "first_hallucination_type": first_hallucination_type,
             }
 
     def _build_prompt(self, question: str) -> str:
