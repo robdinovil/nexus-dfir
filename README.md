@@ -89,13 +89,62 @@ nexus ask lockbit2024 "¿hay malware?"
 
 ## NL→SQL benchmark (qwen2.5:7b-instruct, CPU-only)
 
-| Round | Score | Hallucination rate |
-|---|---|---|
-| Round 1 | 16/20 (80%) | 10% |
-| Round 2 | 18/20 (90%) | 5% |
-| Round 3 | 18/20 (90%) | 5% |
+| Round | Questions | Score | Halluc. rate | Self-correction rate |
+|---|---|---|---|---|
+| Round 1 | 20 | 16/20 (80%) | 10% | — |
+| Round 2 | 20 | 18/20 (90%) | 5% | — |
+| Round 3 | 20 | 18/20 (90%) | 5% | — |
+| Round 4 | 20 | 19/20 (95%) | 5% | tracked |
+| Round 5 | 25 | — | — | — |
 
 Categories with 100% accuracy: cross_table, enumeration, meta, persistence, anomaly, processes, network.
+
+## Hallucination measurement methodology
+
+Nexus classifies LLM errors into three categories before execution:
+
+| Type | Description | Detection method |
+|---|---|---|
+| **Structural** | Column or table that doesn't exist in the schema | Schema inspection after SQL parse |
+| **Referential** | `event_id` value not present in this database | Live DB query against `events` |
+| **Syntax** | Malformed SQL (parse error) | `EXPLAIN QUERY PLAN` |
+
+### Three-layer validator pipeline
+
+```
+LLM generates SQL
+       │
+  [Layer 1] SELECT-only check (structural)
+       │
+  [Layer 2] Table + column existence (structural)
+       │
+  [Layer 3] event_id in DB check (referential)
+       │
+  valid? ── No ──→ inject error hint into prompt → RETRY once
+       │                                                │
+      Yes                                         re-validate
+       │                                                │
+  execute SQL ←──────────────────────── valid? ──Yes──┘
+                                              │
+                                             No → execute anyway, log unresolved hallucination
+```
+
+### Metrics
+
+- **Score** — PASS rate on ground-truth question set (keyword checks + row count bounds)
+- **Hallucination rate** — unresolved hallucinations / total questions (lower = better)
+- **Self-correction rate** — (detected and fixed by validator) / (all triggered) — measures validator effectiveness
+- **Latency** — avg and p95 per-question wall-clock time on CPU-only hardware
+
+### Key finding
+
+The validator's self-correction mechanism converts many structural hallucinations into
+clean PASSes. A question that "hallucinated" but PASSed means the validator caught the
+error and the retry succeeded — this is a feature, not a failure.
+
+SANS FIND EVIL evaluation adds 5 attack-investigation questions (B21–B25) covering:
+timeline anchoring, process attribution, anomaly detection, brute force ranking, and
+off-hours authentication — matching the CTF challenge question style.
 
 ## Architecture
 
