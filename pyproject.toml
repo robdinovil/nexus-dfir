@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nexus-dfir"
+version = "0.2.0"
+description = "DFIR evidence intelligence — NL queries over forensic data, CPU-only, air-gap ready"
+requires-python = ">=3.10"
+dependencies = [
+    "python-evtx>=0.8.1",
+    "pandas>=2.0.0",
+    "openai>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+nexus = "nexus.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["nexus*"]

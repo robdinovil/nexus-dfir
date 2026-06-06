@@ -1,0 +1,10 @@
+# Runtime
+python-evtx>=0.8.1
+pandas>=2.0.0
+openai>=1.0.0
+
+# Opcional: EVTX Rust bindings (~3x más rápido en archivos grandes)
+# evtx>=0.8.0
+
+# Dev
+pytest>=7.0
