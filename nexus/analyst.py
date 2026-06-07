@@ -40,6 +40,9 @@ TABLE_DOCS = {
         "To detect lateral movement: find EID 4624 from external source_ip addresses (NOT LIKE '10.%', '192.168.%', '127.%'). WARNING: 'logon_type' is NOT a column in the events table — do NOT use it in any query.",
         "To detect privilege escalation: correlate EID 4672 with EID 4624 for the same logon session.",
         "External IPs are those NOT starting with 10., 192.168., 172.16-31., or 127.",
+        "EventId 4698=scheduled task created, 4699=scheduled task deleted, 4702=scheduled task updated (Security.evtx). Use these when querying task activity in the events table.",
+        "For process enumeration in events: use event_id=1 (Sysmon process creation, column description contains Image/CommandLine) or event_id=4688 (Windows process creation, column description contains NewProcessName/CommandLine). NEVER use source_file as a process name — source_file is the EVTX filename.",
+        "CRITICAL SQL syntax: when filtering multiple NOT LIKE conditions, ALWAYS repeat the column name before each NOT LIKE. Example: source_ip NOT LIKE '10.%' AND source_ip NOT LIKE '192.168.%' AND source_ip NOT LIKE '127.%'. NEVER write: source_ip NOT LIKE '10.%' AND NOT LIKE '192.168.%'.",
     ],
     "processes": [
         "The 'processes' table contains running process snapshots from tasklist or WMIC output.",
@@ -262,6 +265,45 @@ GENERIC_QA = [
 
     ("¿Cuántos archivos de evidencia hay y de qué tipo?",
      "SELECT evidence_type, COUNT(*) as files, SUM(record_count) as total_rows FROM evidence_files GROUP BY evidence_type ORDER BY total_rows DESC"),
+
+    # ── Bug 1 fix: "per source" — NO external filtering, correct NOT LIKE syntax ──
+    ("How many events are there per source IP?",
+     "SELECT source_ip, COUNT(*) as count FROM events WHERE source_ip IS NOT NULL AND source_ip != '' GROUP BY source_ip ORDER BY count DESC"),
+
+    ("How many events per source?",
+     "SELECT source_ip, COUNT(*) as count FROM events WHERE source_ip IS NOT NULL AND source_ip != '' GROUP BY source_ip ORDER BY count DESC"),
+
+    ("Show event count grouped by source",
+     "SELECT source_ip, COUNT(*) as count FROM events WHERE source_ip IS NOT NULL AND source_ip != '' GROUP BY source_ip ORDER BY count DESC"),
+
+    ("¿Cuántos eventos hay por IP de origen?",
+     "SELECT source_ip, COUNT(*) as count FROM events WHERE source_ip IS NOT NULL AND source_ip != '' GROUP BY source_ip ORDER BY count DESC"),
+
+    ("Show events grouped by external source IP (correct NOT LIKE syntax example)",
+     "SELECT source_ip, COUNT(*) as count FROM events WHERE source_ip IS NOT NULL AND source_ip != '' AND source_ip NOT LIKE '10.%' AND source_ip NOT LIKE '192.168.%' AND source_ip NOT LIKE '127.%' GROUP BY source_ip ORDER BY count DESC"),
+
+    # ── Bug 2 fix: scheduled tasks via events when scheduled_tasks table is empty ──
+    ("Find scheduled task creation events in the event log",
+     "SELECT timestamp_utc, computer, username, description FROM events WHERE event_id IN (4698, 4699, 4702) ORDER BY timestamp_utc"),
+
+    ("¿Qué eventos de creación de tareas programadas hay en el log de eventos?",
+     "SELECT timestamp_utc, computer, username, description FROM events WHERE event_id IN (4698, 4699, 4702) ORDER BY timestamp_utc"),
+
+    ("What scheduled task events exist? Look for task creation, deletion, update.",
+     "SELECT timestamp_utc, computer, username, description FROM events WHERE event_id IN (4698, 4699, 4702) ORDER BY timestamp_utc"),
+
+    # ── Bug 3 fix: process enumeration from events (no processes table) ──────────
+    ("What unique processes ran on the system? Extract from Sysmon process create events.",
+     "SELECT DISTINCT description FROM events WHERE event_id = 1 ORDER BY description LIMIT 50"),
+
+    ("What unique processes are recorded in the event log?",
+     "SELECT DISTINCT description FROM events WHERE event_id IN (1, 4688) ORDER BY description LIMIT 50"),
+
+    ("List all processes seen in event logs",
+     "SELECT timestamp_utc, computer, description FROM events WHERE event_id IN (1, 4688) ORDER BY timestamp_utc"),
+
+    ("¿Qué procesos únicos hay registrados en los eventos?",
+     "SELECT DISTINCT description FROM events WHERE event_id IN (1, 4688) ORDER BY description LIMIT 50"),
 
     # ── Cross-table: proceso por conexión de red ──────────────────────────────
     # JOIN must use n.pid = p.pid (OS process ID), NOT p.id (auto-increment primary key)
