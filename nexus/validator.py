@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 class ValidationResult:
     valid: bool
     errors: list[str] = field(default_factory=list)
-    hallucination_type: str | None = None  # structural / referential / None
+    hallucination_type: str | None = None  # structural / referential / syntax / None
 
     @property
     def error_summary(self) -> str:
@@ -28,23 +28,32 @@ def validate(sql: str, conn: sqlite3.Connection) -> ValidationResult:
     errors = []
     htype = None
 
-    # 1. Parse básico — debe ser SELECT
+    # 1. Parse básico — debe ser SELECT o CTE (WITH ... SELECT)
     sql_clean = sql.strip().rstrip(";")
-    if not sql_clean.upper().startswith("SELECT"):
+    sql_upper = sql_clean.upper().lstrip()
+    if not (sql_upper.startswith("SELECT") or sql_upper.startswith("WITH")):
         return ValidationResult(False, ["SQL must be a SELECT statement"], "structural")
 
     # 1b. Validación sintáctica via EXPLAIN QUERY PLAN
+    # Solo atrapa malformaciones reales (comillas mixtas, paréntesis sin cerrar...).
+    # Errores de tabla/columna se dejan para los checks estructurales abajo.
     try:
         conn.execute(f"EXPLAIN QUERY PLAN {sql_clean}")
     except sqlite3.OperationalError as e:
-        return ValidationResult(False, [f"SQL syntax error: {e}"], "structural")
+        err_lower = str(e).lower()
+        if "no such table" in err_lower or "no such column" in err_lower:
+            pass  # los checks estructurales lo atrapan con mejor mensaje
+        else:
+            return ValidationResult(False, [f"SQL syntax error: {e}"], "syntax")
 
     # 2. Extraer tablas referenciadas
     tables_in_sql = _extract_tables(sql_clean)
     real_tables = _get_real_tables(conn)
+    # Nombres definidos en CTEs son "tablas" válidas para esta query
+    cte_names = {m.lower() for m in re.findall(r"\bWITH\s+(\w+)\s+AS\s*\(", sql_clean, re.IGNORECASE)}
 
     for t in tables_in_sql:
-        if t not in real_tables:
+        if t not in real_tables and t not in cte_names:
             errors.append(f"Table '{t}' does not exist. Available: {', '.join(sorted(real_tables))}")
             htype = "structural"
 
@@ -123,6 +132,10 @@ def _check_columns(sql: str, conn: sqlite3.Connection, tables: list[str]) -> lis
     for t in tables:
         all_valid_cols |= _get_table_columns(conn, t)
 
+    # Aliases definidos en el SQL (AS alias) son válidos como referencias
+    aliases = {m.lower() for m in re.findall(r"\bAS\s+(\w+)", sql, re.IGNORECASE)}
+    all_valid_cols |= aliases
+
     if not all_valid_cols:
         return errors
 
@@ -138,8 +151,10 @@ def _check_columns(sql: str, conn: sqlite3.Connection, tables: list[str]) -> lis
         "exists", "union", "all", "true", "false",
     }
 
-    # Encontrar patrones tipo "table.column" o standalone column en WHERE
-    col_refs = re.findall(r"(?:WHERE|AND|OR|ON|,|\()\s+(?:\w+\.)?(\w+)\s*(?:=|!=|<|>|LIKE|IS|NOT|IN)", sql, re.IGNORECASE)
+    # Encontrar patrones tipo "table.column" o standalone column en WHERE.
+    # \bLIKE\b etc. previene que el regex engine haga backtracking y encuentre
+    # substrings: e.g. 'command_line' → 'command_l' + 'IN' (falso positivo).
+    col_refs = re.findall(r"(?:WHERE|AND|OR|ON|,|\()\s+(?:\w+\.)?(\w+)\s*(?:=|!=|<|>|\bLIKE\b|\bIS\b|\bNOT\b|\bIN\b)", sql, re.IGNORECASE)
     for col in col_refs:
         col_lower = col.lower()
         if col_lower not in SQL_KEYWORDS and col_lower not in all_valid_cols:

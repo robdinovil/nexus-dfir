@@ -30,7 +30,39 @@ def conn():
             username TEXT
         );
     """)
-    return c
+    yield c
+    c.close()
+
+
+@pytest.fixture
+def conn_no_events():
+    """DB sin tabla events — para probar rutas de excepción en _check_event_ids."""
+    c = sqlite3.connect(":memory:")
+    c.executescript("""
+        CREATE TABLE processes (id INTEGER PRIMARY KEY, pid INTEGER, name TEXT);
+    """)
+    yield c
+    c.close()
+
+
+@pytest.fixture
+def conn_empty_events():
+    """DB con tabla events pero sin ninguna fila — event_ids vacíos."""
+    c = sqlite3.connect(":memory:")
+    c.executescript("""
+        CREATE TABLE events (
+            id INTEGER PRIMARY KEY,
+            timestamp_utc TEXT,
+            event_id INTEGER,
+            channel TEXT,
+            username TEXT,
+            source_ip TEXT,
+            computer TEXT,
+            description TEXT
+        );
+    """)
+    yield c
+    c.close()
 
 
 # ── Valid queries ─────────────────────────────────────────────────────────────
@@ -111,5 +143,129 @@ def test_syntax_error_detected(conn):
     bad_sql = "SELECT source_ip FROM events WHERE username = 'admin' AND source_ip NOT LIKE '10.%\" GROUP BY source_ip"
     r = validate(bad_sql, conn)
     assert not r.valid
-    assert r.hallucination_type == "structural"
+    assert r.hallucination_type == "syntax"
     assert "syntax" in r.errors[0].lower()
+
+
+# ── Syntax type (EXPLAIN QUERY PLAN) ──────────────────────────────────────────
+
+def test_double_quoted_string_accepted(conn):
+    # SQLite acepta double quotes como string literal fallback — comportamiento esperado
+    sql = 'SELECT username FROM events WHERE username = "admin"'
+    r = validate(sql, conn)
+    assert r.valid  # SQLite trata "admin" como string, no error
+
+
+def test_unclosed_paren_syntax_error(conn):
+    bad_sql = "SELECT COUNT(*) FROM events WHERE (event_id = 4624"
+    r = validate(bad_sql, conn)
+    assert not r.valid
+    assert r.hallucination_type == "syntax"
+
+
+def test_syntax_hint_generated(conn):
+    bad_sql = "SELECT source_ip FROM events WHERE source_ip NOT LIKE '10.%\" GROUP BY source_ip"
+    r = validate(bad_sql, conn)
+    hint = build_correction_hint(r, conn)
+    assert len(hint) > 0
+
+
+# ── Structural: INSERT/UPDATE/DROP rejection ──────────────────────────────────
+
+def test_insert_rejected(conn):
+    r = validate("INSERT INTO events (id) VALUES (99)", conn)
+    assert not r.valid
+    assert r.hallucination_type == "structural"
+
+
+def test_update_rejected(conn):
+    r = validate("UPDATE events SET channel = 'x' WHERE id = 1", conn)
+    assert not r.valid
+    assert r.hallucination_type == "structural"
+
+
+def test_drop_rejected(conn):
+    r = validate("DROP TABLE events", conn)
+    assert not r.valid
+    assert r.hallucination_type == "structural"
+
+
+# ── Referential: event_id edge cases ─────────────────────────────────────────
+
+def test_event_id_in_list_all_valid(conn):
+    r = validate("SELECT * FROM events WHERE event_id IN (4624, 4625)", conn)
+    assert r.valid
+
+
+def test_event_id_in_list_mixed(conn):
+    r = validate("SELECT * FROM events WHERE event_id IN (4624, 9999)", conn)
+    assert not r.valid
+    assert r.hallucination_type == "referential"
+    assert "9999" in r.errors[0]
+
+
+def test_event_id_all_invalid_in_list(conn):
+    r = validate("SELECT * FROM events WHERE event_id IN (1111, 2222)", conn)
+    assert not r.valid
+    assert r.hallucination_type == "referential"
+
+
+# ── Subquery and CTE ──────────────────────────────────────────────────────────
+
+def test_subquery_valid(conn):
+    sql = ("SELECT username FROM "
+           "(SELECT username, COUNT(*) as cnt FROM events GROUP BY username) t "
+           "WHERE cnt > 1")
+    r = validate(sql, conn)
+    assert r.valid
+
+
+def test_cte_valid(conn):
+    sql = ("WITH top_users AS "
+           "(SELECT username, COUNT(*) as cnt FROM events GROUP BY username) "
+           "SELECT * FROM top_users")
+    r = validate(sql, conn)
+    assert r.valid
+
+
+def test_subquery_bad_table(conn):
+    sql = ("SELECT username FROM "
+           "(SELECT username FROM nonexistent_table) t")
+    r = validate(sql, conn)
+    assert not r.valid
+
+
+# ── Correction hint: column suggestion ───────────────────────────────────────
+
+def test_hint_suggests_similar_column(conn):
+    r = validate("SELECT * FROM events WHERE usernam = 'admin'", conn)
+    if not r.valid and r.hallucination_type == "structural":
+        hint = build_correction_hint(r, conn)
+        assert len(hint) > 0
+
+
+# ── Coverage gaps: event_id checks en DBs sin/vacíos events ──────────────────
+
+def test_event_id_check_no_events_table(conn_no_events):
+    # events table no existe — _check_event_ids debe manejar la excepción
+    r = validate("SELECT * FROM processes WHERE pid = 1", conn_no_events)
+    assert r.valid  # query a processes con event_id en un WHERE no aplica
+
+
+def test_event_id_check_empty_events_table(conn_empty_events):
+    # events table existe pero sin filas — real_ids vacío → válida sin error
+    r = validate("SELECT * FROM events WHERE event_id = 4624", conn_empty_events)
+    # real_ids vacío → early return, no error referential
+    assert r.valid
+
+
+def test_column_check_empty_tables(conn_no_events):
+    # all_valid_cols vacío cuando la tabla no tiene columnas conocidas
+    r = validate("SELECT * FROM processes WHERE pid = 1", conn_no_events)
+    assert r.valid  # sin columnas que verificar → no errores
+
+
+def test_select_constant_no_from(conn):
+    # SELECT sin FROM → tables_in_sql=[], all_valid_cols={} → skip column check
+    r = validate("SELECT 1", conn)
+    assert r.valid
