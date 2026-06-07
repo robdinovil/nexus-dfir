@@ -81,6 +81,12 @@ def main():
         a = ap.parse_args(parsed.args)
         _cmd_benchmark(a.case, a.model)
 
+    elif cmd == "results":
+        _cmd_results(parsed.args[0] if parsed.args else _die("nexus results <caso>"))
+
+    elif cmd == "test":
+        _cmd_test()
+
     elif cmd in ("-h", "--help", "help"):
         _print_help()
 
@@ -363,10 +369,104 @@ def _cmd_shell(case_ref: str, model: str):
     _cmd_chat(model=model, preload=case)
 
 
+def _cmd_test():
+    """Corre el test suite con cobertura y muestra un resumen formateado."""
+    import subprocess
+    import sys
+
+    pkg_root = Path(__file__).parent.parent
+
+    print(f"\n{CYAN}{BOLD}{'─'*65}{RESET}")
+    print(f"{CYAN}{BOLD}  Nexus — Test Suite{RESET}")
+    print(f"{CYAN}{BOLD}{'─'*65}{RESET}\n")
+
+    result = subprocess.run(
+        [
+            sys.executable, "-m", "pytest", "tests/", "-v",
+            "--tb=short", "--no-header", "-q",
+            "--cov=nexus", "--cov-report=term-missing",
+        ],
+        cwd=str(pkg_root),
+        capture_output=False,
+    )
+    sys.exit(result.returncode)
+
+
 def _cmd_benchmark(case_ref: str, model: str):
     from .benchmark import run
+    from datetime import datetime
     case = _resolve(case_ref)
-    run(case.db_path, model=model)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_path = Path(case.path) / f"benchmark_{ts}.json"
+    run(case.db_path, model=model, out_path=str(out_path), store_path=case.store_path)
+
+
+def _cmd_results(case_ref: str):
+    import json
+    case = _resolve(case_ref)
+    case_path = Path(case.path)
+
+    jsons = sorted(case_path.glob("benchmark_*.json"))
+    if not jsons:
+        # fallback: legacy CWD file
+        legacy = Path(f"{Path(case.db_path).stem}_benchmark.json")
+        if legacy.exists():
+            jsons = [legacy]
+
+    if not jsons:
+        print(f"\n  {YELLOW}Sin resultados. Corre primero: nexus benchmark {case.name}{RESET}\n")
+        return
+
+    latest = jsons[-1]
+    with open(latest) as f:
+        d = json.load(f)
+
+    print(f"\n{CYAN}{BOLD}{'─'*70}{RESET}")
+    print(f"{CYAN}{BOLD}  Benchmark Results — {case.name}  [{latest.name}]{RESET}")
+    print(f"{CYAN}{BOLD}{'─'*70}{RESET}")
+    print(f"  Model : {d.get('model', '?')}")
+    print(f"  Score : {BOLD}{d.get('passed',0)}/{d.get('total',0)} ({d.get('score',0):.0%}){RESET}")
+    print(f"  TUS   : {d.get('tus_avg', 'N/A')}")
+    print(f"  RS    : {d.get('reliability_score', 'N/A')}")
+    print(f"  CCR   : {d.get('context_recall_avg', 'N/A')}")
+    h = d.get("hallucinations", {})
+    print(f"  Halluc: {sum(h.values())}  "
+          f"({h.get('structural',0)} struct / "
+          f"{h.get('referential',0)} ref / "
+          f"{h.get('syntax',0)} syntax)")
+    print(f"  Self-correction rate: {d.get('self_correction_rate', 'N/A'):.0%}" if isinstance(d.get('self_correction_rate'), float) else "")
+    print(f"  Latencia avg/p95: {d.get('avg_latency_s','?')}s / {d.get('p95_latency_s','?')}s\n")
+
+    results = d.get("results", [])
+    if not results:
+        return
+
+    print(f"  {BOLD}{'ID':<5} {'Cat':<14} {'Pass':<6} {'TUS':>5} {'CCR':>5}  Pregunta{RESET}")
+    print(f"  {'─'*4} {'─'*12} {'─'*4} {'─'*5} {'─'*5}  {'─'*35}")
+    for r in results:
+        passed = r.get("passed", False)
+        tus    = r.get("tus_score", 0.0)
+        ccr    = r.get("context_recall", 1.0)
+        htype  = r.get("hallucination_type") or ""
+        sc     = r.get("self_corrected", False)
+        p_col  = GREEN if passed else RED
+        t_col  = GREEN if tus >= 0.8 else YELLOW if tus >= 0.5 else RED
+        c_col  = GREEN if ccr >= 0.8 else YELLOW
+
+        h_mark = ""
+        if htype:
+            h_mark = f" {YELLOW}[{htype[:3]}{'✓' if sc else ''}]{RESET}"
+
+        q_short = r.get("question", "")[:42]
+        print(f"  {r['id']:<5} {r['category']:<14} "
+              f"{p_col}{'✓' if passed else '✗'}{RESET:<5} "
+              f"{t_col}{tus:.2f}{RESET:>5} "
+              f"{c_col}{ccr:.2f}{RESET:>5}"
+              f"{h_mark}  {q_short}")
+
+    if len(jsons) > 1:
+        print(f"\n  {DIM}Historial: {len(jsons)} run(s) en {case_path}{RESET}")
+    print()
 
 
 # ── UI helpers ─────────────────────────────────────────────────────────────────
@@ -404,7 +504,9 @@ def _print_help():
   nexus <caso>              abrir caso directamente
   nexus ingest <caso> <dir> ingestar desde script
   nexus ask <caso> "..."    pregunta desde script
-  nexus benchmark <caso>    scorecard NL→SQL
+  nexus benchmark <caso>    scorecard NL→SQL (guarda JSON en el caso)
+  nexus results <caso>      ver último resultado con TUS/RS/CCR por pregunta
+  nexus test                correr unit tests + cobertura
   nexus cases               listar casos
 
 {BOLD}Dentro del chat:{RESET}

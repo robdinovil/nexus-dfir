@@ -20,7 +20,7 @@ class NexusVectorStore:
     """
 
     def __init__(self, store_path: str):
-        self.db = sqlite3.connect(store_path)
+        self.db = sqlite3.connect(store_path, check_same_thread=False)
         self._init_schema()
         self._bm25_cache = {}
 

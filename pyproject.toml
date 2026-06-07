@@ -22,3 +22,8 @@ nexus = "nexus.cli:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["nexus*"]
+
+[tool.pytest.ini_options]
+filterwarnings = [
+    "ignore::ResourceWarning",
+]
