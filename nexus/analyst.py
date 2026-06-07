@@ -32,6 +32,14 @@ TABLE_DOCS = {
         "Column 'computer' is the hostname of the system where the event was recorded.",
         "Column 'description' contains key event fields as key=value pairs extracted from EventData.",
         "To detect brute force: count EID 4625 grouped by username and source_ip.",
+        "EventId 1116 = Windows Defender found malware. EventId 1117 = Windows Defender took action against malware. Use channel LIKE '%Defender%' to filter these.",
+        "EventId 4771 = Kerberos pre-authentication failed (brute force indicator). EventId 4776 = NTLM authentication attempt.",
+        "EventId 4798 = A user's local group membership was enumerated (discovery/recon). EventId 4799 = A security-enabled local group membership was enumerated.",
+        "EventId 5140 = A network share object was accessed. EventId 5145 = A network share object was checked. Both indicate lateral movement via SMB.",
+        "EventId 4662 = An operation was performed on an AD object. EventId 5136 = A directory service object was modified (DCSync prep). EventId 4732 = A member was added to a security-enabled local group. EventId 4742 = A computer account was changed.",
+        "Sysmon EventId 1 = Process creation (Image, CommandLine, ParentImage in description). EventId 3 = Network connection (Image, DestinationIp, DestinationPort in description). EventId 7 = Image loaded. EventId 10 = Process accessed. EventId 11 = File created.",
+        "PowerShell EventId 4104 = Script Block Logging (full script content). EventId 800 = Pipeline execution details.",
+        "EventId 1102 = Security log cleared (defense evasion indicator). EventId 4719 = System audit policy changed.",
         "EventId 21 = Remote Desktop Services session logon succeeded (RDP login).",
         "EventId 22 = Remote Desktop Services shell start notification (RDP session fully established).",
         "EventId 23 = Remote Desktop Services session logoff succeeded.",
@@ -304,6 +312,105 @@ GENERIC_QA = [
 
     ("¿Qué procesos únicos hay registrados en los eventos?",
      "SELECT DISTINCT description FROM events WHERE event_id IN (1, 4688) ORDER BY description LIMIT 50"),
+
+    # ── DFIR Analyst Core Questions ──────────────────────────────────────────
+
+    # Brute force / credential access
+    ("Which source IPs had the most failed logon attempts?",
+     "SELECT source_ip, COUNT(*) as failed_attempts FROM events WHERE event_id IN (4625, 4771) AND source_ip IS NOT NULL AND source_ip != '' GROUP BY source_ip ORDER BY failed_attempts DESC LIMIT 10"),
+
+    ("¿Qué IPs tuvieron más intentos de logon fallido? Detectar brute force.",
+     "SELECT source_ip, COUNT(*) as intentos FROM events WHERE event_id IN (4625, 4771) AND source_ip IS NOT NULL AND source_ip != '' GROUP BY source_ip ORDER BY intentos DESC LIMIT 10"),
+
+    ("Was there a successful logon from an IP that also had failed attempts? Brute force success.",
+     "SELECT DISTINCT e1.source_ip, e1.username FROM events e1 WHERE e1.event_id = 4624 AND e1.source_ip IS NOT NULL AND e1.source_ip != '' AND EXISTS (SELECT 1 FROM events e2 WHERE e2.event_id = 4625 AND e2.source_ip = e1.source_ip) ORDER BY e1.source_ip"),
+
+    ("Which accounts had successful logons and from what source IPs?",
+     "SELECT username, source_ip, COUNT(*) as logon_count FROM events WHERE event_id = 4624 AND username IS NOT NULL AND username != '' GROUP BY username, source_ip ORDER BY logon_count DESC"),
+
+    ("¿Qué cuentas tuvieron logons exitosos y desde qué IPs?",
+     "SELECT username, source_ip, COUNT(*) as logons FROM events WHERE event_id = 4624 AND username IS NOT NULL AND username != '' GROUP BY username, source_ip ORDER BY logons DESC"),
+
+    # Lateral movement — network shares
+    ("What network shares were accessed and by which accounts?",
+     "SELECT username, source_ip, computer, COUNT(*) as access_count FROM events WHERE event_id IN (5140, 5145) AND username IS NOT NULL AND username != '' GROUP BY username, source_ip, computer ORDER BY access_count DESC"),
+
+    ("¿Qué shares de red fueron accedidos y por qué cuentas?",
+     "SELECT username, source_ip, computer, COUNT(*) as accesos FROM events WHERE event_id IN (5140, 5145) GROUP BY username, source_ip, computer ORDER BY accesos DESC"),
+
+    ("Show SMB share access events with source and destination",
+     "SELECT timestamp_utc, username, source_ip, computer FROM events WHERE event_id IN (5140, 5145) ORDER BY timestamp_utc"),
+
+    # Privilege escalation
+    ("Which accounts were assigned special privileges?",
+     "SELECT timestamp_utc, username, computer FROM events WHERE event_id = 4672 ORDER BY timestamp_utc"),
+
+    ("¿Qué cuentas recibieron privilegios especiales (4672)?",
+     "SELECT timestamp_utc, username, computer FROM events WHERE event_id = 4672 ORDER BY timestamp_utc"),
+
+    ("Show all logons where special privileges were assigned",
+     "SELECT timestamp_utc, username, computer, COUNT(*) as count FROM events WHERE event_id = 4672 GROUP BY username, computer ORDER BY count DESC"),
+
+    # C2 / Sysmon network connections (event_id=3)
+    ("What processes created external network connections? Show Sysmon network events.",
+     "SELECT timestamp_utc, computer, description FROM events WHERE event_id = 3 ORDER BY timestamp_utc LIMIT 30"),
+
+    ("¿Qué procesos crearon conexiones de red externas? Eventos Sysmon de red.",
+     "SELECT timestamp_utc, computer, description FROM events WHERE event_id = 3 ORDER BY timestamp_utc LIMIT 30"),
+
+    ("Show all Sysmon network connection events (event_id 3)",
+     "SELECT timestamp_utc, computer, description FROM events WHERE event_id = 3 ORDER BY timestamp_utc LIMIT 50"),
+
+    # PowerShell execution
+    ("What PowerShell scripts or commands were executed?",
+     "SELECT timestamp_utc, computer, description FROM events WHERE event_id IN (4104, 800) ORDER BY timestamp_utc LIMIT 20"),
+
+    ("¿Qué scripts o comandos PowerShell se ejecutaron?",
+     "SELECT timestamp_utc, computer, description FROM events WHERE event_id IN (4104, 800) ORDER BY timestamp_utc LIMIT 20"),
+
+    ("Show PowerShell script block logging events",
+     "SELECT timestamp_utc, computer, description FROM events WHERE event_id = 4104 ORDER BY timestamp_utc LIMIT 20"),
+
+    # Windows Defender alerts
+    ("What malware or threats were detected by Windows Defender?",
+     "SELECT timestamp_utc, computer, description FROM events WHERE event_id IN (1116, 1117) ORDER BY timestamp_utc"),
+
+    ("¿Qué amenazas o malware detectó Windows Defender?",
+     "SELECT timestamp_utc, computer, description FROM events WHERE channel LIKE '%Defender%' ORDER BY timestamp_utc"),
+
+    ("Show Windows Defender detections and actions taken",
+     "SELECT timestamp_utc, computer, description FROM events WHERE event_id IN (1116, 1117) ORDER BY timestamp_utc"),
+
+    # Log clearing / defense evasion
+    ("Were any event logs cleared?",
+     "SELECT timestamp_utc, username, computer, description FROM events WHERE event_id = 1102 ORDER BY timestamp_utc"),
+
+    ("¿Se borraron logs de eventos? Detectar evasión de defensas.",
+     "SELECT timestamp_utc, username, computer FROM events WHERE event_id = 1102 ORDER BY timestamp_utc"),
+
+    # Directory service modifications (persistence / DCSync prep)
+    ("What directory service modifications were made?",
+     "SELECT timestamp_utc, username, computer, description FROM events WHERE event_id IN (5136, 4662, 4732, 4742) ORDER BY timestamp_utc"),
+
+    ("¿Qué modificaciones se hicieron en Active Directory?",
+     "SELECT timestamp_utc, username, computer, description FROM events WHERE event_id IN (5136, 4662, 4732, 4742) ORDER BY timestamp_utc"),
+
+    # User/group enumeration (discovery)
+    ("What user and group memberships were enumerated?",
+     "SELECT timestamp_utc, username, computer, COUNT(*) as enum_count FROM events WHERE event_id IN (4798, 4799) GROUP BY username, computer ORDER BY enum_count DESC"),
+
+    ("¿Qué usuarios y grupos fueron enumerados? Detectar reconocimiento interno.",
+     "SELECT timestamp_utc, username, computer FROM events WHERE event_id IN (4798, 4799) ORDER BY timestamp_utc"),
+
+    # Suspicious process creation
+    ("What processes were created with suspicious or encoded command lines?",
+     "SELECT timestamp_utc, computer, description FROM events WHERE event_id IN (1, 4688) AND (description LIKE '%EncodedCommand%' OR description LIKE '%-enc %' OR description LIKE '%IEX%' OR description LIKE '%bypass%' OR description LIKE '%Invoke-WebRequest%' OR description LIKE '%DownloadString%') ORDER BY timestamp_utc"),
+
+    ("¿Qué procesos se crearon con comandos sospechosos o codificados?",
+     "SELECT timestamp_utc, computer, description FROM events WHERE event_id IN (1, 4688) AND (description LIKE '%EncodedCommand%' OR description LIKE '%-enc%' OR description LIKE '%IEX%' OR description LIKE '%Invoke%' OR description LIKE '%bypass%') ORDER BY timestamp_utc LIMIT 20"),
+
+    ("Show all Sysmon process creation events (event_id 1)",
+     "SELECT timestamp_utc, computer, description FROM events WHERE event_id = 1 ORDER BY timestamp_utc LIMIT 30"),
 
     # ── Cross-table: proceso por conexión de red ──────────────────────────────
     # JOIN must use n.pid = p.pid (OS process ID), NOT p.id (auto-increment primary key)
