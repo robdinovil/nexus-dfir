@@ -81,6 +81,9 @@ def main():
         a = ap.parse_args(parsed.args)
         _cmd_benchmark(a.case, a.model)
 
+    elif cmd == "hunt":
+        _cmd_hunt(parsed.args[0] if parsed.args else _die("nexus hunt <caso>"))
+
     elif cmd == "results":
         _cmd_results(parsed.args[0] if parsed.args else _die("nexus results <caso>"))
 
@@ -361,6 +364,14 @@ def _cmd_ask(case_ref: str, question: str, model: str):
     case   = _resolve(case_ref)
     router = NexusRouter(case, model=model)
     router.ask(question)
+    router.close()
+
+
+def _cmd_hunt(case_ref: str):
+    from .router import NexusRouter
+    case   = _resolve(case_ref)
+    router = NexusRouter(case)
+    router._run_threat_hunt()
     router.close()
 
 

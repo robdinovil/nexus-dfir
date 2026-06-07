@@ -179,8 +179,9 @@ def detect_intent(question: str) -> str:
     # Threat hunt — palabras clave de malware/TTP
     if re.search(
         r"\b(malware|virus|infectad|infected|ransomware|trojan|"
-        r"threat|amenaza|ttp|yara|hunting|caceria|"
-        r"hay\s+malware|busca\s+malware|analiza\s+amenazas|"
+        r"threats?|amenazas?|ttp|yara|hunting|hunt|caceria|"
+        r"hay\s+malware|busca\s+malware|analiza\s+amenazas?|"
+        r"busca\s+amenazas?|caza\s+amenazas?|"
         r"detecta|detection|patr[oó]n\s+sospec)\b",
         q
     ):
