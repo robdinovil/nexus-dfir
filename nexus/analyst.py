@@ -99,6 +99,15 @@ TABLE_DOCS = {
         "Column 'ip_addresses' lists all configured IP addresses.",
         "Column 'hotfixes' lists installed patches — missing patches indicate vulnerability exposure.",
     ],
+    "evidence_files": [
+        "IoC extraction: to list all unique IPs use SELECT DISTINCT source_ip FROM events WHERE source_ip IS NOT NULL AND source_ip != '' ORDER BY source_ip.",
+        "Attacker account identification: exclude SYSTEM, LOCAL SERVICE, NETWORK SERVICE, ANONYMOUS LOGON, and accounts ending in '$' (machine accounts). Filter: username NOT IN ('SYSTEM','LOCAL SERVICE','NETWORK SERVICE','ANONYMOUS LOGON') AND username NOT LIKE '%$' AND username NOT LIKE 'NT AUTHORITY%'.",
+        "Dwell time calculation: SELECT MIN(timestamp_utc) as start, MAX(timestamp_utc) as end FROM events WHERE timestamp_utc IS NOT NULL AND timestamp_utc != ''.",
+        "Attack phase classification: event_ids map to ATT&CK phases — 4625/4771/4776/4768=Credential Access, 4624/4648=Initial Access/Lateral, 1/4688/4697=Execution, 5140/5145=Lateral Movement, 4698/5136/4662=Persistence, 1102/4719=Defense Evasion, 4672/4673/4674=Privilege Escalation.",
+        "MITRE TTP mapping via CASE WHEN: use CASE WHEN event_id = X THEN 'TXxx Description' to map event IDs to technique names in SELECT queries.",
+        "RDP events: 21=session logon, 22=shell start, 23=logoff, 24=disconnect. source_ip contains the connecting client IP.",
+        "For executive/CISO summary: use COUNT(DISTINCT computer) as systems, COUNT(DISTINCT username) as accounts, COUNT(*) as total_events in a single SELECT.",
+    ],
 }
 
 # ── Pares pregunta-SQL genéricos ──────────────────────────────────────────────
@@ -482,7 +491,122 @@ GENERIC_QA = [
 
     ("What process corresponds to each active network connection?",
      "SELECT p.name, p.pid, n.protocol, n.remote_address, n.remote_port, n.state FROM network_connections n JOIN processes p ON n.pid = p.pid WHERE n.state IN ('ESTABLISHED', 'LISTENING') ORDER BY n.state"),
+
+    # ── IoC Extraction ────────────────────────────────────────────────────────
+    # For both DFIR and CISO — extract indicators of compromise
+
+    ("Extract all IP addresses seen in evidence — list every unique IP with occurrence count.",
+     "SELECT source_ip, COUNT(*) as occurrences FROM events WHERE source_ip IS NOT NULL AND source_ip != '' GROUP BY source_ip ORDER BY occurrences DESC"),
+
+    ("What are the external IP addresses (IoCs) seen in this incident?",
+     "SELECT DISTINCT source_ip, COUNT(*) as hits FROM events WHERE source_ip IS NOT NULL AND source_ip != '' AND source_ip NOT LIKE '10.%' AND source_ip NOT LIKE '192.168.%' AND source_ip NOT LIKE '172.16.%' AND source_ip NOT LIKE '172.17.%' AND source_ip NOT LIKE '172.18.%' AND source_ip NOT LIKE '127.%' AND source_ip NOT LIKE '::1' AND source_ip NOT LIKE 'fe80%' GROUP BY source_ip ORDER BY hits DESC"),
+
+    ("List all user accounts involved in the attack — exclude system and service accounts.",
+     "SELECT username, COUNT(*) as event_count, MIN(timestamp_utc) as first_seen, MAX(timestamp_utc) as last_seen FROM events WHERE username IS NOT NULL AND username != '' AND username NOT IN ('SYSTEM','LOCAL SERVICE','NETWORK SERVICE','ANONYMOUS LOGON','DWM-1','DWM-2','DWM-3') AND username NOT LIKE 'NT AUTHORITY%' AND username NOT LIKE '%$' GROUP BY username ORDER BY event_count DESC"),
+
+    ("What are the suspicious process names seen in events? List process names from execution events.",
+     "SELECT description, COUNT(*) as count FROM events WHERE event_id IN (1, 4688) AND description IS NOT NULL AND description != '' GROUP BY description ORDER BY count DESC LIMIT 20"),
+
+    ("What domains, computers, or hostnames were targeted in this incident?",
+     "SELECT computer, COUNT(*) as events, MIN(timestamp_utc) as first_seen, MAX(timestamp_utc) as last_seen FROM events WHERE computer IS NOT NULL AND computer != '' GROUP BY computer ORDER BY events DESC"),
+
+    ("What files or services were created by the attacker?",
+     "SELECT timestamp_utc, event_id, computer, username, description FROM events WHERE event_id IN (11, 4697, 7045) ORDER BY timestamp_utc"),
+
+    # ── CISO / Executive Questions ────────────────────────────────────────────
+    # Business impact, scope, duration — language for leadership
+
+    ("What systems were compromised in this incident?",
+     "SELECT computer, COUNT(*) as event_count, MIN(timestamp_utc) as first_activity, MAX(timestamp_utc) as last_activity FROM events WHERE computer IS NOT NULL AND computer != '' GROUP BY computer ORDER BY event_count DESC"),
+
+    ("¿Qué sistemas fueron comprometidos en este incidente?",
+     "SELECT computer, COUNT(*) as eventos, MIN(timestamp_utc) as primer_actividad, MAX(timestamp_utc) as ultima_actividad FROM events WHERE computer IS NOT NULL AND computer != '' GROUP BY computer ORDER BY eventos DESC"),
+
+    ("How long was the attacker present in the environment? What is the dwell time?",
+     "SELECT MIN(timestamp_utc) as attack_start, MAX(timestamp_utc) as attack_end, COUNT(*) as total_events, COUNT(DISTINCT computer) as systems_affected FROM events WHERE timestamp_utc IS NOT NULL AND timestamp_utc != ''"),
+
+    ("¿Cuánto tiempo estuvo el atacante en el sistema? ¿Cuál es el dwell time del incidente?",
+     "SELECT MIN(timestamp_utc) as inicio_ataque, MAX(timestamp_utc) as fin_ataque, COUNT(*) as total_eventos, COUNT(DISTINCT computer) as sistemas_afectados FROM events WHERE timestamp_utc IS NOT NULL AND timestamp_utc != ''"),
+
+    ("What was the overall scope of the attack? Summarize systems, accounts, and event volume.",
+     "SELECT COUNT(DISTINCT computer) as systems, COUNT(DISTINCT username) as accounts, COUNT(*) as total_events, COUNT(DISTINCT event_id) as event_types FROM events WHERE computer IS NOT NULL"),
+
+    ("¿Cuál fue el alcance del ataque? Resume sistemas, cuentas y volumen de eventos.",
+     "SELECT COUNT(DISTINCT computer) as sistemas, COUNT(DISTINCT username) as cuentas_involucradas, COUNT(*) as total_eventos, COUNT(DISTINCT event_id) as tipos_evento FROM events WHERE computer IS NOT NULL"),
+
+    ("Were any credentials or accounts compromised? Show authentication failures and successes.",
+     "SELECT event_id, COUNT(*) as count, COUNT(DISTINCT username) as users_targeted FROM events WHERE event_id IN (4625, 4771, 4776, 4768, 4624, 4648) GROUP BY event_id ORDER BY count DESC"),
+
+    ("¿Se comprometieron credenciales o cuentas? Muestra intentos fallidos y accesos exitosos.",
+     "SELECT event_id, COUNT(*) as intentos, COUNT(DISTINCT username) as usuarios_objetivo FROM events WHERE event_id IN (4625, 4771, 4776, 4768, 4624, 4648) GROUP BY event_id ORDER BY intentos DESC"),
+
+    ("What was the business impact? What services or systems were affected?",
+     "SELECT computer, COUNT(DISTINCT event_id) as attack_techniques, COUNT(*) as total_events FROM events WHERE computer IS NOT NULL AND computer != '' GROUP BY computer ORDER BY attack_techniques DESC"),
+
+    # ── Incident Timeline & Narrative Reconstruction ──────────────────────────
+
+    ("How did the attacker first gain access? Show the earliest attack events.",
+     "SELECT timestamp_utc, event_id, username, source_ip, computer, description FROM events WHERE timestamp_utc IS NOT NULL AND timestamp_utc != '' ORDER BY timestamp_utc ASC LIMIT 15"),
+
+    ("¿Cómo obtuvo acceso inicial el atacante? Muestra los primeros eventos del ataque.",
+     "SELECT timestamp_utc, event_id, username, source_ip, computer FROM events WHERE timestamp_utc IS NOT NULL AND timestamp_utc != '' ORDER BY timestamp_utc ASC LIMIT 15"),
+
+    ("What was the attack progression? Show the sequence of accounts, systems, and techniques over time.",
+     "SELECT timestamp_utc, event_id, username, source_ip, computer FROM events WHERE username IS NOT NULL AND username != '' AND timestamp_utc IS NOT NULL ORDER BY timestamp_utc ASC LIMIT 40"),
+
+    ("¿Cómo progresó el ataque? Muestra la secuencia de cuentas, sistemas y técnicas en el tiempo.",
+     "SELECT timestamp_utc, event_id, username, source_ip, computer FROM events WHERE username IS NOT NULL AND timestamp_utc IS NOT NULL ORDER BY timestamp_utc ASC LIMIT 40"),
+
+    ("What were the last attacker actions before detection or containment?",
+     "SELECT timestamp_utc, event_id, username, source_ip, computer, description FROM events WHERE timestamp_utc IS NOT NULL AND timestamp_utc != '' ORDER BY timestamp_utc DESC LIMIT 15"),
+
+    ("Recreate the incident timeline: show all events grouped by attack phase (auth, execution, lateral, persistence).",
+     "SELECT CASE WHEN event_id IN (4625,4771,4776,4768) THEN 'credential_attack' WHEN event_id IN (4624,4648,4964) THEN 'authentication' WHEN event_id IN (1,4688,4697) THEN 'execution' WHEN event_id IN (5140,5145) THEN 'lateral_movement' WHEN event_id IN (4698,4699,5136,4662) THEN 'persistence' WHEN event_id IN (1102,4719) THEN 'defense_evasion' WHEN event_id IN (4672,4673,4674) THEN 'privilege_escalation' ELSE 'other' END as phase, COUNT(*) as events FROM events GROUP BY phase ORDER BY events DESC"),
+
+    ("¿Cómo recrear el incidente? Clasifica todos los eventos por fase del ataque.",
+     "SELECT CASE WHEN event_id IN (4625,4771,4776,4768) THEN 'acceso_credenciales' WHEN event_id IN (4624,4648,4964) THEN 'autenticacion' WHEN event_id IN (1,4688,4697) THEN 'ejecucion' WHEN event_id IN (5140,5145) THEN 'movimiento_lateral' WHEN event_id IN (4698,4699,5136,4662) THEN 'persistencia' WHEN event_id IN (1102,4719) THEN 'evasion_defensa' WHEN event_id IN (4672,4673,4674) THEN 'escalacion_privilegios' ELSE 'otro' END as fase, COUNT(*) as eventos FROM events GROUP BY fase ORDER BY eventos DESC"),
+
+    # ── MITRE ATT&CK Mapping Queries ──────────────────────────────────────────
+
+    ("What initial access techniques were used? Show credential attacks and exploitation.",
+     "SELECT event_id, COUNT(*) as count, COUNT(DISTINCT username) as targets, COUNT(DISTINCT source_ip) as sources FROM events WHERE event_id IN (4625, 4771, 4776, 4768, 4648, 5145, 5140) GROUP BY event_id ORDER BY count DESC"),
+
+    ("What execution techniques are in evidence? Show process creation and service installation.",
+     "SELECT event_id, computer, description, COUNT(*) as count FROM events WHERE event_id IN (1, 4688, 4697, 7045, 4698) GROUP BY event_id, computer ORDER BY count DESC"),
+
+    ("What privilege escalation events occurred? Show special privilege use.",
+     "SELECT timestamp_utc, event_id, username, computer, description FROM events WHERE event_id IN (4672, 4673, 4674, 4964) ORDER BY timestamp_utc"),
+
+    ("What persistence mechanisms were established by the attacker?",
+     "SELECT timestamp_utc, event_id, username, computer, description FROM events WHERE event_id IN (4698, 4699, 4702, 5136, 4662, 7045, 4697, 13) ORDER BY timestamp_utc"),
+
+    ("¿Qué mecanismos de persistencia dejó el atacante?",
+     "SELECT timestamp_utc, event_id, username, computer, description FROM events WHERE event_id IN (4698, 4699, 4702, 5136, 4662, 7045, 4697) ORDER BY timestamp_utc"),
+
+    ("What defense evasion techniques were used? Show log clearing and suspicious activity.",
+     "SELECT timestamp_utc, event_id, username, computer, description FROM events WHERE event_id IN (1102, 4719, 4688, 1) AND (event_id = 1102 OR description LIKE '%clear%' OR description LIKE '%delete%' OR description LIKE '%wevtutil%') ORDER BY timestamp_utc"),
+
+    ("What lateral movement techniques are evident? Show SMB access and remote logons.",
+     "SELECT timestamp_utc, event_id, username, source_ip, computer FROM events WHERE event_id IN (5140, 5145, 4624, 4648) ORDER BY timestamp_utc"),
+
+    ("Map all observed TTPs to MITRE ATT&CK — what techniques does this evidence cover?",
+     "SELECT event_id, COUNT(*) as occurrences, CASE event_id WHEN 4625 THEN 'T1110 Brute Force' WHEN 4771 THEN 'T1110.003 Password Spray (Kerberos)' WHEN 4776 THEN 'T1110 Brute Force (NTLM)' WHEN 4624 THEN 'T1078 Valid Accounts' WHEN 4648 THEN 'T1550.002 Pass the Hash' WHEN 5140 THEN 'T1021.002 SMB/Windows Admin Shares' WHEN 5145 THEN 'T1021.002 SMB File Transfer' WHEN 4698 THEN 'T1053.005 Scheduled Task' WHEN 4697 THEN 'T1543.003 Windows Service' WHEN 5136 THEN 'T1484 Domain Policy Modification' WHEN 4662 THEN 'T1003.006 DCSync / AD Access' WHEN 1102 THEN 'T1070.001 Clear Windows Event Logs' WHEN 4672 THEN 'T1134 Access Token Manipulation' WHEN 1 THEN 'T1059 Command Execution (Sysmon)' WHEN 3 THEN 'T1071 C2 Network Connection (Sysmon)' WHEN 7 THEN 'T1574 DLL Side-Loading (Sysmon)' WHEN 11 THEN 'T1105 Ingress Tool Transfer (Sysmon)' ELSE 'Other' END as mitre_technique FROM events GROUP BY event_id ORDER BY occurrences DESC"),
+
+    # ── RDP-specific (for563_rdp) ──────────────────────────────────────────────
+
+    ("Which users connected via RDP and from which source IPs?",
+     "SELECT username, source_ip, COUNT(*) as sessions, MIN(timestamp_utc) as first_seen, MAX(timestamp_utc) as last_seen FROM events WHERE event_id IN (21, 22, 131) AND username IS NOT NULL AND username != '' GROUP BY username, source_ip ORDER BY sessions DESC"),
+
+    ("Show the full RDP session timeline — user, source IP, event type, and timestamp.",
+     "SELECT timestamp_utc, event_id, username, source_ip, computer FROM events WHERE event_id IN (21, 22, 23, 24, 25, 131) ORDER BY timestamp_utc"),
+
+    ("Which external IPs accessed via RDP? Flag non-internal connections.",
+     "SELECT DISTINCT source_ip, username, COUNT(*) as connections FROM events WHERE event_id IN (21, 22, 131) AND source_ip NOT LIKE '10.%' AND source_ip NOT LIKE '192.168.%' AND source_ip NOT LIKE '172.16.%' GROUP BY source_ip, username ORDER BY connections DESC"),
 ]
+
+
+# ── TABLE_DOCS additions ──────────────────────────────────────────────────────
+# Appended below in the TABLE_DOCS dict — loaded separately
 
 
 class NexusAnalyst:
