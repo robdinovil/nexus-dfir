@@ -67,6 +67,14 @@ def main():
         a = ap.parse_args(parsed.args)
         _cmd_ask(a.case, a.question, a.model)
 
+    elif cmd == "explain":
+        ap = _sub_parser("explain")
+        ap.add_argument("case")
+        ap.add_argument("question")
+        ap.add_argument("--model", default=DEFAULT_MODEL)
+        a = ap.parse_args(parsed.args)
+        _cmd_explain(a.case, a.question, a.model)
+
     elif cmd == "shell":
         ap = _sub_parser("shell")
         ap.add_argument("case")
@@ -365,6 +373,15 @@ def _cmd_ask(case_ref: str, question: str, model: str):
     router = NexusRouter(case, model=model)
     router.ask(question)
     router.close()
+
+
+def _cmd_explain(case_ref: str, question: str, model: str):
+    from .analyst import NexusAnalyst
+    from .case import NexusCase
+    case     = _resolve(case_ref)
+    analyst  = NexusAnalyst(case.db_path, model=model, store_path=str(case.store_path))
+    analyst.ask_with_explanation(question, verbose=True)
+    analyst.close()
 
 
 def _cmd_hunt(case_ref: str):

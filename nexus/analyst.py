@@ -786,7 +786,7 @@ class NexusAnalyst:
         parts.append(f"=== QUESTION ===\n{question}\n\nSQL:")
         return "\n".join(parts)
 
-    def _call_llm(self, prompt: str) -> str:
+    def _call_llm(self, prompt: str, max_tokens: int = 256) -> str:
         """Llama al LLM via Ollama API compatible con OpenAI."""
         import httpx
         from openai import OpenAI
@@ -800,9 +800,52 @@ class NexusAnalyst:
             model=self.model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.0,
-            max_tokens=256,
+            max_tokens=max_tokens,
         )
         return resp.choices[0].message.content or ""
+
+    def ask_with_explanation(self, question: str, verbose: bool = True) -> dict:
+        """NL→SQL + interpretación forense del analista sobre los resultados."""
+        result = self.ask(question, verbose=verbose)
+
+        if result.get("error") or result.get("result") is None:
+            return {**result, "explanation": None}
+
+        df = result["result"]
+        if len(df) == 0:
+            data_summary = "(no rows returned)"
+        elif len(df) <= 20:
+            data_summary = df.to_string(index=False)
+        else:
+            data_summary = (
+                df.head(15).to_string(index=False)
+                + f"\n... ({len(df)} rows total, showing first 15)"
+            )
+
+        explain_prompt = (
+            f"You are a senior DFIR analyst reviewing forensic evidence from a Windows environment.\n"
+            f"The analyst asked: \"{question}\"\n\n"
+            f"The forensic database returned ({len(df)} rows):\n{data_summary}\n\n"
+            f"Answer in 2-3 concise sentences:\n"
+            f"1. What specific attack technique or adversary behavior does this evidence indicate?\n"
+            f"2. What is the attacker's likely goal or impact?\n"
+            f"3. What artifact or pivot should the analyst examine next?\n"
+            f"Be direct. Reference specific values from the data above."
+        )
+
+        if verbose:
+            print(f"\n  {CYAN}[Análisis DFIR]...{RESET}", flush=True)
+
+        explanation = self._call_llm(explain_prompt, max_tokens=384)
+
+        if verbose:
+            print(f"\n  {CYAN}{'─'*60}{RESET}")
+            print(f"  {CYAN}{BOLD}  Interpretación del analista:{RESET}")
+            for line in explanation.strip().splitlines():
+                print(f"  {line}")
+            print(f"  {CYAN}{'─'*60}{RESET}\n")
+
+        return {**result, "explanation": explanation}
 
     def describe_case(self) -> None:
         print(f"\n{CYAN}{BOLD}{'─'*60}{RESET}")
