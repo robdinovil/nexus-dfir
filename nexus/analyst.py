@@ -418,6 +418,62 @@ GENERIC_QA = [
     ("Show all Sysmon process creation events (event_id 1)",
      "SELECT timestamp_utc, computer, description FROM events WHERE event_id = 1 ORDER BY timestamp_utc LIMIT 30"),
 
+    # ── Incident correlation — kill chain queries ─────────────────────────────
+
+    # Scope: all machines involved
+    ("What machines were involved in this incident? Show all computers with event counts.",
+     "SELECT computer, COUNT(*) as events, COUNT(DISTINCT event_id) as unique_event_types FROM events WHERE computer IS NOT NULL AND computer != '' GROUP BY computer ORDER BY events DESC LIMIT 15"),
+
+    ("¿Qué máquinas participaron en el incidente? Resumen por equipo.",
+     "SELECT computer, COUNT(*) as eventos FROM events WHERE computer IS NOT NULL AND computer != '' GROUP BY computer ORDER BY eventos DESC LIMIT 15"),
+
+    # Initial access — credential attacks
+    ("What were the first credential attacks? Show failed logons by source IP and target machine.",
+     "SELECT source_ip, computer, COUNT(*) as attempts FROM events WHERE event_id IN (4625, 4771) AND source_ip IS NOT NULL AND source_ip != '' GROUP BY source_ip, computer ORDER BY attempts DESC LIMIT 10"),
+
+    ("Show the attack progression: failed logons followed by successful logons from the same IP.",
+     "SELECT DISTINCT e1.source_ip, e1.computer, e1.username FROM events e1 WHERE e1.event_id = 4624 AND e1.source_ip IS NOT NULL AND e1.source_ip != '' AND EXISTS (SELECT 1 FROM events e2 WHERE e2.event_id IN (4625, 4771) AND e2.source_ip = e1.source_ip) ORDER BY e1.source_ip"),
+
+    # Lateral movement — account pivots
+    ("Which accounts moved laterally between machines? Show logons and share access across systems.",
+     "SELECT username, source_ip, computer, COUNT(*) as connections FROM events WHERE event_id IN (4624, 5140, 5145) AND source_ip IS NOT NULL AND source_ip != '' AND source_ip NOT LIKE '127.%' GROUP BY username, source_ip, computer ORDER BY connections DESC LIMIT 20"),
+
+    ("¿Qué cuentas se usaron para movimiento lateral entre equipos?",
+     "SELECT username, source_ip, computer, COUNT(*) as eventos FROM events WHERE event_id IN (4624, 5140, 5145) AND source_ip IS NOT NULL AND source_ip != '' GROUP BY username, source_ip, computer ORDER BY eventos DESC LIMIT 20"),
+
+    # Privilege escalation
+    ("Which accounts received special privileges during the incident?",
+     "SELECT timestamp_utc, username, computer, COUNT(*) as count FROM events WHERE event_id = 4672 GROUP BY username, computer ORDER BY count DESC"),
+
+    # Persistence — all mechanisms
+    ("What persistence mechanisms were established? Show scheduled tasks, services, and AD changes.",
+     "SELECT event_id, timestamp_utc, username, computer, description FROM events WHERE event_id IN (4698, 4702, 7045, 5136) ORDER BY timestamp_utc"),
+
+    ("¿Qué mecanismos de persistencia se instalaron? Tareas, servicios y cambios en AD.",
+     "SELECT event_id, timestamp_utc, username, computer, description FROM events WHERE event_id IN (4698, 4702, 7045, 5136) ORDER BY timestamp_utc"),
+
+    # Defense evasion
+    ("What defense evasion actions were taken? Show log clearing and audit policy changes.",
+     "SELECT timestamp_utc, event_id, username, computer FROM events WHERE event_id IN (1102, 4719) ORDER BY timestamp_utc"),
+
+    # Execution — processes and PowerShell
+    ("What processes and commands were executed during the incident?",
+     "SELECT timestamp_utc, computer, description FROM events WHERE event_id IN (1, 4688, 4104) ORDER BY timestamp_utc LIMIT 30"),
+
+    # Full kill chain timeline
+    ("Show the full incident timeline ordered by time. Include all key attack events.",
+     "SELECT timestamp_utc, event_id, username, source_ip, computer FROM events WHERE event_id IN (4625, 4771, 4624, 5145, 4672, 4698, 7045, 5136, 1102, 4719, 1, 4688, 3, 4104) AND timestamp_utc IS NOT NULL AND timestamp_utc != '' ORDER BY timestamp_utc LIMIT 50"),
+
+    ("¿Cuál es la línea de tiempo completa del incidente? Todos los eventos clave ordenados.",
+     "SELECT timestamp_utc, event_id, username, source_ip, computer FROM events WHERE event_id IN (4625, 4771, 4624, 5145, 4672, 4698, 7045, 5136, 1102, 4719, 1, 4688) AND timestamp_utc IS NOT NULL ORDER BY timestamp_utc LIMIT 50"),
+
+    # Actor identification
+    ("Which user account appears most across attack phases? Find the primary threat actor.",
+     "SELECT username, COUNT(DISTINCT event_id) as phases_covered, COUNT(*) as total_events FROM events WHERE username IS NOT NULL AND username != '' AND username NOT IN ('SYSTEM','LOCAL SERVICE','NETWORK SERVICE','ANONYMOUS LOGON') GROUP BY username ORDER BY phases_covered DESC, total_events DESC LIMIT 10"),
+
+    ("¿Qué cuenta de usuario aparece en más fases del ataque? Identificar al actor principal.",
+     "SELECT username, COUNT(DISTINCT event_id) as fases, COUNT(*) as eventos_totales FROM events WHERE username IS NOT NULL AND username != '' AND username NOT IN ('SYSTEM','LOCAL SERVICE','NETWORK SERVICE') GROUP BY username ORDER BY fases DESC LIMIT 10"),
+
     # ── Cross-table: proceso por conexión de red ──────────────────────────────
     # JOIN must use n.pid = p.pid (OS process ID), NOT p.id (auto-increment primary key)
     # processes columns: id, pid, name — process_name does NOT exist in processes
