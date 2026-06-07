@@ -343,18 +343,25 @@ class NexusRouter:
         return result
 
     def _run_threat_hunt(self) -> dict:
+        from .finding_validator import enrich_hits
         hits = tool_threat_hunt(self._conn)
         if not hits:
             print(f"  {GREEN}✓ Sin hallazgos — no se detectaron TTPs conocidos{RESET}")
             return {"hits": [], "error": None}
 
+        hits = enrich_hits(hits)
         total = sum(h["count"] for h in hits)
         print(f"  {RED}{BOLD}⚠ {len(hits)} reglas disparadas — {total} hallazgos totales{RESET}\n")
 
         for h in hits:
             sev_color = _SEV_COLOR.get(h["severity"], "")
-            print(f"  {sev_color}[{h['severity']}] {h['rule_id']} — {h['name']}{RESET}")
+            v = h["validation"]
+            conf_color = GREEN if v.confidence >= 0.75 else YELLOW if v.confidence >= 0.50 else DIM
+            print(f"  {sev_color}[{h['severity']}] {h['rule_id']} — {h['name']}{RESET}  "
+                  f"{conf_color}confidence:{v.confidence:.0%} [{v.risk_label}] fp:{v.fp_risk}{RESET}")
             print(h["rows"].to_string(index=False))
+            if v.notes:
+                print(f"  {DIM}  ↳ {' · '.join(v.notes)}{RESET}")
             print()
 
         return {"hits": hits, "error": None}
