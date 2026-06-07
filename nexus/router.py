@@ -177,7 +177,12 @@ def detect_intent(question: str) -> str:
     q = question.lower()
 
     # Threat hunt — palabras clave de malware/TTP
-    if re.search(
+    # Exclusión: preguntas específicas sobre herramientas/productos (Defender, AV)
+    # deben ir a SQL para consultar event_ids específicos (1116/1117), no al hunt genérico.
+    is_specific_tool_query = bool(re.search(
+        r"\b(defender|antivirus|av\b|windows\s+defender|symantec|crowdstrike|sentinel)\b", q
+    ))
+    if not is_specific_tool_query and re.search(
         r"\b(malware|virus|infectad|infected|ransomware|trojan|"
         r"threats?|amenazas?|ttp|yara|hunting|hunt|caceria|"
         r"hay\s+malware|busca\s+malware|analiza\s+amenazas?|"

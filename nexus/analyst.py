@@ -361,6 +361,12 @@ GENERIC_QA = [
     ("Show all Sysmon network connection events (event_id 3)",
      "SELECT timestamp_utc, computer, description FROM events WHERE event_id = 3 ORDER BY timestamp_utc LIMIT 50"),
 
+    ("What external network connections did processes make? Sysmon event 3.",
+     "SELECT timestamp_utc, computer, description FROM events WHERE event_id = 3 ORDER BY timestamp_utc LIMIT 30"),
+
+    ("Show Sysmon network connections — which processes connected where",
+     "SELECT timestamp_utc, computer, description FROM events WHERE event_id = 3 ORDER BY timestamp_utc LIMIT 30"),
+
     # PowerShell execution
     ("What PowerShell scripts or commands were executed?",
      "SELECT timestamp_utc, computer, description FROM events WHERE event_id IN (4104, 800) ORDER BY timestamp_utc LIMIT 20"),
