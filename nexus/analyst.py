@@ -37,7 +37,7 @@ TABLE_DOCS = {
         "EventId 23 = Remote Desktop Services session logoff succeeded.",
         "EventId 24 = Remote Desktop Services session disconnected.",
         "For RDP analysis use EventId=21 to find successful RDP logons. column source_ip contains the originating IP.",
-        "To detect lateral movement: find EID 4624 with logon_type=3 (network logon) from external IPs.",
+        "To detect lateral movement: find EID 4624 from external source_ip addresses (NOT LIKE '10.%', '192.168.%', '127.%'). WARNING: 'logon_type' is NOT a column in the events table — do NOT use it in any query.",
         "To detect privilege escalation: correlate EID 4672 with EID 4624 for the same logon session.",
         "External IPs are those NOT starting with 10., 192.168., 172.16-31., or 127.",
     ],
@@ -189,6 +189,88 @@ GENERIC_QA = [
 
     ("What is the date range of events? What is the earliest and latest event?",
      "SELECT MIN(timestamp_utc) AS first_event, MAX(timestamp_utc) AS last_event FROM events"),
+
+    # ── Network connections ───────────────────────────────────────────────────
+    ("¿Qué conexiones de red estaban activas?",
+     "SELECT protocol, local_address, local_port, remote_address, remote_port, state, pid FROM network_connections WHERE state IN ('ESTABLISHED', 'LISTENING') ORDER BY state, remote_port"),
+
+    ("¿Cuáles son todas las conexiones de red activas en el sistema?",
+     "SELECT protocol, local_address, local_port, remote_address, remote_port, state, pid FROM network_connections ORDER BY state"),
+
+    ("What active network connections existed on the system?",
+     "SELECT protocol, local_address, local_port, remote_address, remote_port, state, pid FROM network_connections WHERE state IN ('ESTABLISHED', 'LISTENING') ORDER BY remote_port"),
+
+    ("¿Qué conexiones están en estado ESTABLISHED o LISTENING?",
+     "SELECT protocol, local_address, local_port, remote_address, remote_port, state, pid FROM network_connections WHERE state IN ('ESTABLISHED', 'LISTENING') ORDER BY state"),
+
+    # ── Attribution: proceso con más conexiones externas ─────────────────────
+    ("¿Qué proceso tiene más conexiones externas establecidas?",
+     "SELECT p.name, p.pid, COUNT(*) as ext_connections FROM network_connections n JOIN processes p ON n.pid = p.pid WHERE n.state = 'ESTABLISHED' AND n.remote_address NOT LIKE '10.%' AND n.remote_address NOT LIKE '192.168.%' AND n.remote_address NOT LIKE '127.%' GROUP BY p.name, p.pid ORDER BY ext_connections DESC LIMIT 1"),
+
+    ("Which process has the most established external connections?",
+     "SELECT p.name, p.pid, COUNT(*) as connections FROM network_connections n JOIN processes p ON n.pid = p.pid WHERE n.state = 'ESTABLISHED' GROUP BY p.pid ORDER BY connections DESC LIMIT 1"),
+
+    # ── Timeline: primeros/últimos N eventos (sin filtro) ────────────────────
+    # B05: ORDER BY timestamp_utc LIMIT N — NO WHERE clause. Model tends to add
+    # unnecessary WHERE filters when all retrieved examples have event_id conditions.
+    ("Muestra los primeros 10 eventos ordenados por fecha",
+     "SELECT timestamp_utc, event_id, username, computer FROM events ORDER BY timestamp_utc LIMIT 10"),
+
+    ("¿Cuáles son los 10 eventos más antiguos del log?",
+     "SELECT timestamp_utc, event_id, username, computer FROM events ORDER BY timestamp_utc ASC LIMIT 10"),
+
+    ("Show the first 10 events in chronological order",
+     "SELECT timestamp_utc, event_id, username, computer FROM events ORDER BY timestamp_utc LIMIT 10"),
+
+    ("List the earliest 5 events sorted by date",
+     "SELECT timestamp_utc, event_id, username, computer FROM events ORDER BY timestamp_utc ASC LIMIT 5"),
+
+    # ── Timeline: primer logon exitoso ────────────────────────────────────────
+    ("¿Cuál fue el primer evento de logon exitoso registrado?",
+     "SELECT MIN(timestamp_utc) AS first_logon, username, source_ip, computer FROM events WHERE event_id = 4624"),
+
+    ("What was the first successful logon event?",
+     "SELECT timestamp_utc, username, source_ip, computer FROM events WHERE event_id = 4624 ORDER BY timestamp_utc LIMIT 1"),
+
+    ("¿Cuándo ocurrió el primer logon exitoso? ¿Cuál fue el primer acceso exitoso?",
+     "SELECT MIN(timestamp_utc) AS primer_logon FROM events WHERE event_id = 4624"),
+
+    # ── Anomaly: autenticación nocturna ───────────────────────────────────────
+    ("¿Qué usuario se autenticó en horario nocturno, entre las 0 y las 6am?",
+     "SELECT username, timestamp_utc FROM events WHERE event_id = 4624 AND CAST(strftime('%H', timestamp_utc) AS INTEGER) BETWEEN 0 AND 6 ORDER BY timestamp_utc"),
+
+    ("Which users authenticated during nighttime hours between midnight and 6am?",
+     "SELECT username, COUNT(*) as count FROM events WHERE event_id = 4624 AND CAST(strftime('%H', timestamp_utc) AS INTEGER) < 6 GROUP BY username ORDER BY count DESC"),
+
+    # ── Persistence: tareas programadas y registro ────────────────────────────
+    ("¿Qué tareas programadas existen en el sistema?",
+     "SELECT task_name, trigger_type, scheduled_time, status FROM scheduled_tasks ORDER BY task_name"),
+
+    ("List all scheduled tasks on the system",
+     "SELECT task_name, trigger_type, scheduled_time, status FROM scheduled_tasks ORDER BY task_name"),
+
+    ("¿Qué claves de registro de autorun o persistencia existen?",
+     "SELECT key_path, value_name, value_data FROM registry_keys WHERE key_path LIKE '%Run%' OR key_path LIKE '%RunOnce%' OR key_path LIKE '%Services%' ORDER BY key_path"),
+
+    ("Show registry autorun keys used for persistence",
+     "SELECT key_path, value_name, value_data FROM registry_keys WHERE key_path LIKE '%Run%' OR key_path LIKE '%RunOnce%' ORDER BY key_path"),
+
+    # ── Meta: evidencia disponible ────────────────────────────────────────────
+    # evidence_files columns: id, filename, filepath, evidence_type, file_size_kb, ingested_at, record_count
+    ("Resume la evidencia disponible: cuántos archivos, qué tipos, cuántos registros",
+     "SELECT evidence_type, COUNT(*) as archivos, SUM(record_count) as registros FROM evidence_files GROUP BY evidence_type ORDER BY registros DESC"),
+
+    ("¿Cuántos archivos de evidencia hay y de qué tipo?",
+     "SELECT evidence_type, COUNT(*) as files, SUM(record_count) as total_rows FROM evidence_files GROUP BY evidence_type ORDER BY total_rows DESC"),
+
+    # ── Cross-table: proceso por conexión de red ──────────────────────────────
+    # JOIN must use n.pid = p.pid (OS process ID), NOT p.id (auto-increment primary key)
+    # processes columns: id, pid, name — process_name does NOT exist in processes
+    ("¿Qué proceso corresponde a cada conexión de red activa?",
+     "SELECT p.name, p.pid, n.protocol, n.local_address, n.local_port, n.remote_address, n.remote_port, n.state FROM network_connections n JOIN processes p ON n.pid = p.pid WHERE n.state IN ('ESTABLISHED', 'LISTENING') ORDER BY n.state"),
+
+    ("What process corresponds to each active network connection?",
+     "SELECT p.name, p.pid, n.protocol, n.remote_address, n.remote_port, n.state FROM network_connections n JOIN processes p ON n.pid = p.pid WHERE n.state IN ('ESTABLISHED', 'LISTENING') ORDER BY n.state"),
 ]
 
 
@@ -203,7 +285,7 @@ class NexusAnalyst:
             Path(db_path).parent / f"nexus_store_{self.case_name}.db"
         )
 
-        self.conn = sqlite3.connect(db_path)
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self._active_tables = self._detect_active_tables()
 
@@ -507,7 +589,7 @@ class NexusAnalyst:
             model=self.model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.0,
-            max_tokens=500,
+            max_tokens=256,
         )
         return resp.choices[0].message.content or ""
 

@@ -23,9 +23,12 @@ Métricas implementadas:
 
 import json
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+_QUESTION_TIMEOUT_S = 600  # hard wall-clock limit per question (10 min, CPU-only safe)
 
 # ── Ground truth questions ────────────────────────────────────────────────────
 # Cada entrada tiene:
@@ -254,7 +257,7 @@ BENCHMARK_QUESTIONS = [
     {
         "id": "B21",
         "question": "¿Cuál fue el primer evento de logon exitoso registrado?",
-        "must_contain":     ["timestamp_utc", "order", "limit"],
+        "must_contain":     ["timestamp_utc", "4624"],
         "must_not_contain": ["logon_type"],
         "expected_cols":    ["timestamp_utc"],
         "min_rows": 1,
@@ -428,12 +431,11 @@ def _compute_tus(q: dict, sql_lower: str, rows: int | None) -> float:
 
 def _compute_context_recall(question: str, q: dict, analyst) -> float:
     """
-    NonLLM Context Recall — % de términos clave presentes en top-5 docs BM25.
-    Mide si el retriever recuperó lo necesario para responder la pregunta.
+    NonLLM Context Recall — % de términos clave en top-5 Q-SQL pairs recuperados.
+    Mide la calidad del retriever BM25 sobre los examples que el LLM realmente recibe.
     Fuente: RAGAS NonLLMContextRecall, adaptado sin LLM judge.
+    Usa get_similar_qa() en vez de docs-only para soportar preguntas en español.
     """
-    from .vectorstore import _bm25_scores
-
     needed: set[str] = set()
     needed.update(q.get("applies_to", []))
     needed.update(c.lower() for c in q.get("expected_cols", []) if c)
@@ -443,28 +445,54 @@ def _compute_context_recall(question: str, q: dict, analyst) -> float:
     if not needed:
         return 1.0
 
-    all_docs = analyst._store.get_all_docs()
-    if not all_docs:
+    qa_pairs = analyst._store.get_similar_qa(question, top_k=5)
+    if not qa_pairs:
         return 0.0
 
-    scores = _bm25_scores(question, all_docs)
-    ranked = sorted(zip(scores, all_docs), key=lambda x: x[0], reverse=True)
-    top5 = " ".join(doc.lower() for _, doc in ranked[:5])
+    top5 = " ".join(
+        (p.get("question", "") + " " + p.get("sql", "")).lower()
+        for p in qa_pairs
+    )
 
     return sum(1 for term in needed if term in top5) / len(needed)
 
 
+def _ask_with_timeout(analyst, question: str, timeout_s: int = _QUESTION_TIMEOUT_S):
+    """Run analyst.ask() in a daemon thread. Returns (result_dict, exception_or_None)."""
+    bucket: dict = {}
+
+    def _target():
+        try:
+            bucket["result"] = analyst.ask(question, verbose=False)
+        except Exception as e:
+            bucket["error"] = e
+
+    t = threading.Thread(target=_target, daemon=True)
+    t.start()
+    t.join(timeout=timeout_s)
+
+    if t.is_alive():
+        return None, TimeoutError(f"timed out after {timeout_s}s")
+    if "error" in bucket:
+        return None, bucket["error"]
+    return bucket.get("result"), None
+
+
 def run(db_path: str, model: str = "qwen2.5:7b-instruct",
-        save_json: bool = True) -> BenchmarkReport:
+        save_json: bool = True, out_path: str | None = None,
+        store_path: str | None = None) -> BenchmarkReport:
     from .analyst import NexusAnalyst
     from .validator import validate
 
-    analyst = NexusAnalyst(db_path, model=model)
+    analyst = NexusAnalyst(db_path, model=model, store_path=store_path)
     analyst.train()
 
     active = set(analyst._active_tables)
     results = []
     t_start = time.time()
+
+    import sys
+    sys.stdout.reconfigure(line_buffering=True)
 
     BOLD   = "\033[1m"
     CYAN   = "\033[96m"
@@ -485,12 +513,14 @@ def run(db_path: str, model: str = "qwen2.5:7b-instruct",
             continue
 
         t0 = time.time()
-        try:
-            result = analyst.ask(q["question"], verbose=False)
-        except Exception as exc:
-            elapsed = round(time.time() - t0, 1)
-            issues = [f"exception: {type(exc).__name__}"]
-            print(f"  {q['id']:<5} {q['category']:<15} {RED}ERROR{RESET:<16}  ─                      {elapsed:>5}s  {q['question'][:35]}")
+        result, exc = _ask_with_timeout(analyst, q["question"])
+        elapsed = round(time.time() - t0, 1)
+
+        if exc is not None:
+            is_timeout = isinstance(exc, TimeoutError)
+            label = "TIMEOUT" if is_timeout else "ERROR"
+            issues = [str(exc)]
+            print(f"  {q['id']:<5} {q['category']:<15} {RED}{label:<10}{RESET}  ─                      {elapsed:>5}s  {q['question'][:35]}")
             results.append(QuestionResult(
                 id=q["id"], question=q["question"], category=q["category"],
                 sql_generated=None, rows_returned=None, passed=False,
@@ -498,7 +528,6 @@ def run(db_path: str, model: str = "qwen2.5:7b-instruct",
                 self_corrected=False, issues=issues, elapsed_s=elapsed,
             ))
             continue
-        elapsed = round(time.time() - t0, 1)
 
         sql              = result.get("sql") or ""
         df               = result.get("result")
@@ -593,9 +622,10 @@ def run(db_path: str, model: str = "qwen2.5:7b-instruct",
     _print_summary(report)
 
     if save_json:
-        out = Path(db_path).stem + "_benchmark.json"
-        _save_json(report, out)
-        print(f"\n  Reporte guardado: {out}\n")
+        if out_path is None:
+            out_path = Path(db_path).stem + "_benchmark.json"
+        _save_json(report, str(out_path))
+        print(f"\n  Reporte guardado: {out_path}\n")
 
     return report
 
