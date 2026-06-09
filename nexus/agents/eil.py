@@ -40,6 +40,9 @@ Rules:
 - ONLY use usernames and IPs listed in CASE DATA. Never invent values.
 - One THOUGHT + one ACTION per turn. No explanations outside this format.
 - Call done() as soon as you can describe: initial access + what attacker did.
+- NEVER query by specific date or time unless the CASE DATA shows timestamps.
+- If a sql_query returns an ERROR, do NOT repeat the same query — try a different tool.
+- If you have already called the same tool twice with no new findings, call done().
 
 Output format (strict, no deviation):
 THOUGHT: <one sentence reasoning>

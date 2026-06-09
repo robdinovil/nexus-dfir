@@ -204,6 +204,36 @@ GENERIC_QA = [
     ("Show events that occurred outside business hours (before 8am or after 8pm)",
      "SELECT timestamp_utc, event_id, username, computer FROM events WHERE CAST(strftime('%H', timestamp_utc) AS INTEGER) < 8 OR CAST(strftime('%H', timestamp_utc) AS INTEGER) >= 20 ORDER BY timestamp_utc LIMIT 100"),
 
+    # ── B07 fix: unique users — NO event_id filter, simple DISTINCT ─────────
+    ("¿Qué usuarios únicos hay en los eventos? Lista todos los usuarios distintos.",
+     "SELECT DISTINCT username FROM events WHERE username IS NOT NULL AND username != '' ORDER BY username"),
+
+    ("What unique usernames appear in the events? List distinct users.",
+     "SELECT DISTINCT username FROM events WHERE username IS NOT NULL AND username != '' ORDER BY username"),
+
+    ("¿Qué usuarios únicos aparecen en los logs?",
+     "SELECT DISTINCT username, COUNT(*) as eventos FROM events WHERE username IS NOT NULL AND username != '' GROUP BY username ORDER BY eventos DESC"),
+
+    # ── B08 fix: unique computers — NO event_id filter, simple DISTINCT ──────
+    ("¿Qué equipos aparecen en los logs? ¿Cuáles son las computadoras en la evidencia?",
+     "SELECT DISTINCT computer FROM events WHERE computer IS NOT NULL AND computer != '' ORDER BY computer"),
+
+    ("What computers or hosts appear in the logs?",
+     "SELECT DISTINCT computer, COUNT(*) as eventos FROM events WHERE computer IS NOT NULL AND computer != '' GROUP BY computer ORDER BY eventos DESC"),
+
+    ("¿Qué máquinas o sistemas aparecen en los registros de eventos?",
+     "SELECT DISTINCT computer FROM events WHERE computer IS NOT NULL AND computer != '' ORDER BY computer"),
+
+    # ── B23 fix: suspicious exe_path (Temp/AppData) — use exe_path column ────
+    ("¿Hay procesos corriendo desde directorios temporales o AppData?",
+     "SELECT DISTINCT name, exe_path, username FROM processes WHERE exe_path LIKE '%Temp%' OR exe_path LIKE '%AppData%' OR exe_path LIKE '%\\Users\\%\\Downloads%' ORDER BY name"),
+
+    ("Are there processes running from Temp or AppData directories?",
+     "SELECT name, exe_path, username, command_line FROM processes WHERE exe_path LIKE '%Temp%' OR exe_path LIKE '%AppData%' OR exe_path LIKE '%\\\\Temp\\\\%' OR exe_path LIKE '%\\\\AppData\\\\%' ORDER BY name"),
+
+    ("Show processes running from suspicious paths like Temp, AppData, or Downloads",
+     "SELECT pid, name, exe_path, username FROM processes WHERE exe_path IS NOT NULL AND (exe_path LIKE '%Temp%' OR exe_path LIKE '%AppData%' OR exe_path LIKE '%Downloads%') ORDER BY name"),
+
     ("¿Cuál es el rango de fechas de los eventos? ¿Cuándo empieza y termina el dataset?",
      "SELECT MIN(timestamp_utc) AS first_event, MAX(timestamp_utc) AS last_event FROM events"),
 
