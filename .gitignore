@@ -7,6 +7,6 @@ build/
 *.db
 *.db-shm
 *.db-wal
-*.cast
+# *.cast  — demos tracked in demos/casts/
 data/
 *.json
