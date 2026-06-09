@@ -1,323 +1,323 @@
-# Nexus: A Local NL→SQL Engine for Air-Gap Digital Forensics with Automated Hallucination Correction
+# Nexus: Un Motor NL→SQL Local para Forense Digital en Entornos Air-Gap con Corrección Automática de Alucinaciones
 
 **Roberto Vilchis Meza**  
-Independent Security Researcher  
+Investigador Independiente de Seguridad  
 vilchismezaroberto@gmail.com
 
-**Submitted to**: FIRST Annual Conference 2026  
-**Track**: Threat Intelligence & Incident Response  
-**Date**: June 2026
+**Enviado a**: Conferencia Anual FIRST 2026  
+**Track**: Inteligencia de Amenazas y Respuesta a Incidentes  
+**Fecha**: Junio 2026
 
 ---
 
-## Abstract
+## Resumen
 
-Digital forensic investigations increasingly demand rapid analysis of large, heterogeneous evidence corpora — Windows Event Logs, process snapshots, network captures, registry exports — under conditions that prohibit transmission of sensitive data to external cloud services. We present **Nexus**, an open-source platform that enables natural language querying of forensic evidence using a local large language model (LLM) with zero external dependencies. Nexus translates analyst questions into precise SQLite queries through a BM25-augmented few-shot pipeline, validated by a three-layer hallucination detector with automatic self-correction. On a benchmark of 25 forensic questions across 10 categories, Nexus achieves **100% pass rate, 0% hallucination rate, and 100% self-correction rate** using `qwen2.5:7b-instruct` on CPU-only hardware. We further introduce the **Evidence Interrogation Loop (EIL)**, a ReAct agent that autonomously constructs incident kill chains from raw evidence without analyst intervention. All components operate fully air-gapped on a standard laptop.
-
----
-
-## 1. Introduction
-
-Incident responders face a structural problem: the volume of forensic evidence grows faster than analyst capacity. A single Windows endpoint generates tens of thousands of Event Log entries per day; a ransomware incident may involve dozens of systems and millions of events. Existing approaches fall into two categories:
-
-**Manual SQL/grep analysis** requires deep schema knowledge and produces queries that are brittle and non-reusable. A junior analyst cannot easily formulate `SELECT username, source_ip FROM events WHERE event_id = 4625 GROUP BY username, source_ip ORDER BY COUNT(*) DESC` from a natural language question.
-
-**Cloud-based AI assistants** (ChatGPT, Copilot, Gemini) can generate SQL from natural language, but require transmitting forensic evidence to external servers — a practice prohibited by legal, regulatory, and operational security constraints in most real incident response engagements.
-
-Nexus addresses both problems: it accepts natural language questions in Spanish or English, generates verified SQLite queries, and executes them against a local database — entirely offline, with no network calls beyond the local Ollama inference server.
-
-### 1.1 Contributions
-
-1. A **NL→SQL pipeline** with BM25 few-shot retrieval optimized for forensic artifact schemas
-2. A **three-layer hallucination validator** (structural, referential, syntax) with automatic retry
-3. A **benchmark suite** of 25 forensic questions with ground-truth SQL and reproducible metrics
-4. An **EIL ReAct agent** that autonomously investigates cases using tool calls
-5. Evaluation across **27 real forensic cases** spanning LockBit ransomware, APT campaigns, red team exercises, and RDP intrusions
+Las investigaciones de forense digital exigen cada vez más el análisis rápido de grandes corpus de evidencia heterogénea — registros de eventos de Windows, snapshots de procesos, capturas de red, exportaciones de registro — bajo condiciones que prohíben la transmisión de datos sensibles a servicios en la nube. Presentamos **Nexus**, una plataforma de código abierto que permite consultar evidencia forense en lenguaje natural usando un modelo de lenguaje grande (LLM) local, sin dependencias externas. Nexus traduce preguntas de analistas a consultas SQLite precisas mediante un pipeline few-shot aumentado con BM25, validado por un detector de alucinaciones de tres capas con autocorrección automática. En un benchmark de 25 preguntas forenses en 10 categorías, Nexus logra **100% de tasa de éxito, 0% de tasa de alucinación y 100% de tasa de autocorrección** usando `qwen2.5:7b-instruct` en hardware sin GPU. Presentamos además el **Evidence Interrogation Loop (EIL)**, un agente ReAct que construye cadenas de ataque de forma autónoma a partir de evidencia en bruto sin intervención del analista. Todos los componentes operan completamente air-gapped en una laptop estándar.
 
 ---
 
-## 2. Problem Statement
+## 1. Introducción
 
-### 2.1 The Forensic Evidence Schema
+Los respondedores de incidentes enfrentan un problema estructural: el volumen de evidencia forense crece más rápido que la capacidad del analista. Un solo endpoint Windows genera decenas de miles de entradas en el Event Log por día; un incidente de ransomware puede involucrar docenas de sistemas y millones de eventos. Los enfoques existentes se dividen en dos categorías:
 
-Nexus normalizes heterogeneous forensic artifacts into a unified SQLite schema:
+**Análisis manual SQL/grep**: requiere conocimiento profundo del esquema y produce consultas frágiles y no reutilizables. Un analista junior no puede formular fácilmente `SELECT username, source_ip FROM events WHERE event_id = 4625 GROUP BY username, source_ip ORDER BY COUNT(*) DESC` a partir de una pregunta en lenguaje natural.
+
+**Asistentes de IA en la nube** (ChatGPT, Copilot, Gemini): pueden generar SQL desde lenguaje natural, pero requieren transmitir la evidencia forense a servidores externos — práctica prohibida por restricciones legales, regulatorias y de seguridad operacional en la mayoría de los compromisos reales de respuesta a incidentes.
+
+Nexus resuelve ambos problemas: acepta preguntas en español o inglés, genera consultas SQLite verificadas y las ejecuta contra una base de datos local — completamente sin conexión, sin llamadas de red más allá del servidor de inferencia Ollama local.
+
+### 1.1 Contribuciones
+
+1. Un **pipeline NL→SQL** con recuperación few-shot BM25 optimizado para esquemas de artefactos forenses
+2. Un **validador de alucinaciones de tres capas** (estructural, referencial, sintáctico) con reintentos automáticos
+3. Un **suite de benchmark** de 25 preguntas forenses con SQL de referencia y métricas reproducibles
+4. Un **agente ReAct EIL** que investiga casos de forma autónoma usando llamadas a herramientas
+5. Evaluación sobre **27 casos forenses reales** que abarcan ransomware LockBit, campañas APT, ejercicios red team e intrusiones RDP
+
+---
+
+## 2. Planteamiento del Problema
+
+### 2.1 El Esquema de Evidencia Forense
+
+Nexus normaliza artefactos forenses heterogéneos en un esquema SQLite unificado:
 
 ```
-events              ← Windows Event Logs (EVTX)
-processes           ← Process snapshots (tasklist, WMIC)
-network_connections ← Network state (netstat)
-scheduled_tasks     ← Persistence (schtasks CSV)
-registry_keys       ← Autorun registry exports
-system_info         ← System metadata (systeminfo)
-evidence_files      ← Ingestion manifest
+events              ← Registros de eventos Windows (EVTX)
+processes           ← Snapshots de procesos (tasklist, WMIC)
+network_connections ← Estado de red (netstat)
+scheduled_tasks     ← Persistencia (schtasks CSV)
+registry_keys       ← Exportaciones de registro de autorun
+system_info         ← Metadatos del sistema (systeminfo)
+evidence_files      ← Manifiesto de ingestión
 ```
 
-This normalization enables cross-artifact JOIN queries that are impossible when artifacts are stored as flat files.
+Esta normalización permite consultas JOIN entre artefactos que son imposibles cuando los artefactos se almacenan como archivos planos.
 
-### 2.2 Why NL→SQL, Not RAG
+### 2.2 Por Qué NL→SQL y No RAG
 
-Retrieval-Augmented Generation (RAG) is the dominant approach for LLM-based document analysis. However, forensic artifacts are not documents — they are structured records. RAG over forensic evidence has fundamental limitations:
+La Generación Aumentada por Recuperación (RAG) es el enfoque dominante para el análisis de documentos con LLM. Sin embargo, los artefactos forenses no son documentos — son registros estructurados. RAG sobre evidencia forense tiene limitaciones fundamentales:
 
-| Dimension | NL→SQL (Nexus) | RAG (embeddings) |
+| Dimensión | NL→SQL (Nexus) | RAG (embeddings) |
 |---|---|---|
-| Precision | Exact — returns only what SQL selects | Approximate — chunk boundaries split evidence |
-| Aggregation | Native (COUNT, GROUP BY, HAVING) | Requires post-processing |
-| Cross-artifact joins | SQL JOIN across all tables | Hard — chunks rarely co-locate related artifacts |
-| Air-gap deployment | SQLite + Ollama — zero external deps | Requires vector DB or local embedding model |
-| Hallucination surface | SQL syntax — detectable and correctable | Semantic — harder to validate |
-| Latency (CPU) | 65–135s/query (LLM bottleneck) | 5–30s/query |
+| Precisión | Exacta — devuelve solo lo que selecciona SQL | Aproximada — los límites de chunk fragmentan la evidencia |
+| Agregación | Nativa (COUNT, GROUP BY, HAVING) | Requiere post-procesamiento |
+| Joins entre artefactos | SQL JOIN sobre todas las tablas | Difícil — los chunks rara vez co-ubican artefactos relacionados |
+| Despliegue air-gap | SQLite + Ollama — cero dependencias externas | Requiere BD vectorial o modelo de embeddings local |
+| Superficie de alucinación | Sintaxis SQL — detectable y corregible | Semántica — más difícil de validar |
+| Latencia (CPU) | 65–135s/consulta (cuello de botella LLM) | 5–30s/consulta |
 
-**Verdict**: NL→SQL is strictly better for structured forensic artifacts. RAG is appropriate for unstructured evidence (emails, PDFs, chat logs).
+**Veredicto**: NL→SQL es estrictamente superior para artefactos forenses estructurados. RAG es apropiado para evidencia no estructurada (correos, PDFs, registros de chat).
 
 ---
 
-## 3. Architecture
+## 3. Arquitectura
 
-### 3.1 Pipeline Overview
+### 3.1 Visión General del Pipeline
 
 ```
-Natural language question
+Pregunta en lenguaje natural
          │
-    [BM25 Retrieval]
-    Vector store (388 items per case)
-    DDL + TABLE_DOCS + Q-SQL pairs
+    [Recuperación BM25]
+    Vector store (388 ítems por caso)
+    DDL + TABLE_DOCS + pares P-SQL
          │
     [LLM — qwen2.5:7b-instruct]
-    Ollama local inference
+    Inferencia local Ollama
          │
-    [SQL draft]
+    [Borrador SQL]
          │
-    [3-Layer Validator]
+    [Validador 3 Capas]
     ┌────────────────────────┐
-    │ Layer 1: Structural    │ → unknown table/column?
-    │ Layer 2: Referential   │ → event_id not in this DB?
-    │ Layer 3: Syntax        │ → EXPLAIN QUERY PLAN
+    │ Capa 1: Estructural    │ → ¿tabla/columna desconocida?
+    │ Capa 2: Referencial    │ → ¿event_id no existe en esta BD?
+    │ Capa 3: Sintáctico     │ → EXPLAIN QUERY PLAN
     └────────────────────────┘
-         │ fail → retry with error injected in prompt
-         │ pass
-    [SQLite execution]
+         │ fallo → reintento con error inyectado en el prompt
+         │ éxito
+    [Ejecución SQLite]
          │
-    Result DataFrame
+    DataFrame de resultados
 ```
 
-### 3.2 BM25 Vector Store
+### 3.2 Vector Store BM25
 
-Each case has a dedicated vector store built from three layers:
+Cada caso tiene un vector store dedicado construido en tres capas:
 
-| Layer | Count | Purpose |
+| Capa | Cantidad | Propósito |
 |---|---|---|
-| DDL (schema) | 8 | Table definitions with column names and types |
-| TABLE_DOCS | 25+ | Event ID mappings, column semantics, critical warnings |
-| Q-SQL pairs | 144+ | Question → SQL examples, all forensic categories |
-| **Total** | **~388** | Per case (varies by active tables) |
+| DDL (esquema) | 8 | Definiciones de tablas con nombres y tipos de columna |
+| TABLE_DOCS | 25+ | Mapeo de event IDs, semántica de columnas, advertencias críticas |
+| Pares P-SQL | 144+ | Pregunta → SQL de ejemplo, todas las categorías forenses |
+| **Total** | **~388** | Por caso (varía según las tablas activas) |
 
-At query time, BM25 retrieves the 3 most similar Q-SQL pairs as few-shot examples. No embedding model is needed — BM25 over SQLite is pure Python with zero external dependencies.
+En tiempo de consulta, BM25 recupera los 3 pares P-SQL más similares como ejemplos few-shot. No se necesita modelo de embeddings — BM25 sobre SQLite es Python puro sin dependencias externas.
 
-### 3.3 Three-Layer Hallucination Validator
+### 3.3 Validador de Alucinaciones de Tres Capas
 
-LLMs generating SQL for forensic databases exhibit three failure modes:
+Los LLM que generan SQL para bases de datos forenses exhiben tres modos de fallo:
 
-**Structural hallucination**: The model references a column or table that does not exist in the schema (e.g., `hostname` instead of `computer`, `event_type` instead of `event_id`). Detected by comparing the SQL AST against the actual schema.
+**Alucinación estructural**: El modelo referencia una columna o tabla que no existe en el esquema (ej. `hostname` en lugar de `computer`, `event_type` en lugar de `event_id`). Se detecta comparando el AST del SQL contra el esquema real.
 
-**Referential hallucination**: The model uses an `event_id` value that is not present in this specific case's database (e.g., using `event_id = 4688` in a database that only contains Sysmon events). Detected by querying the actual event_id distribution.
+**Alucinación referencial**: El modelo usa un valor de `event_id` que no existe en la base de datos de este caso específico (ej. usar `event_id = 4688` en una BD que solo contiene eventos Sysmon). Se detecta consultando la distribución real de event_ids.
 
-**Syntax hallucination**: The SQL is structurally malformed and would crash SQLite (e.g., `column NOT LIKE 'x' AND NOT LIKE 'y'` — missing column repetition). Detected by running `EXPLAIN QUERY PLAN`.
+**Alucinación sintáctica**: El SQL es estructuralmente malformado y crashearía SQLite (ej. `column NOT LIKE 'x' AND NOT LIKE 'y'` — sin repetición de columna). Se detecta ejecutando `EXPLAIN QUERY PLAN`.
 
-When a hallucination is detected, the error description is injected into the prompt and the LLM retries. In R8, 100% of detected hallucinations were auto-corrected on first retry.
+Cuando se detecta una alucinación, la descripción del error se inyecta en el prompt y el LLM reintenta. En R8, el 100% de las alucinaciones detectadas se corrigieron automáticamente en el primer reintento.
 
-### 3.4 Intent Router
+### 3.4 Router de Intención
 
-Not all questions require NL→SQL. The router classifies intent without an LLM:
+No todas las preguntas requieren NL→SQL. El router clasifica la intención sin usar un LLM:
 
 ```
-threat_hunt  ← regex: "malware", "suspicious", "attack", "hunt", "threat"
-ioc          ← regex: IP/domain/hash patterns
-sql          ← default (everything else)
+threat_hunt  ← regex: "malware", "sospechoso", "ataque", "hunt", "amenaza"
+ioc          ← regex: patrones IP/dominio/hash
+sql          ← default (todo lo demás)
 ```
 
-Threat hunt applies 11 hardcoded MITRE ATT&CK rules directly to the database — instantaneous, no LLM call required. Routing accuracy: 24/24 (100%) on held-out test set.
+La caza de amenazas aplica 11 reglas MITRE ATT&CK hardcodeadas directamente sobre la base de datos — instantáneo, sin llamada al LLM. Precisión de enrutamiento: 24/24 (100%) en conjunto de prueba.
 
 ### 3.5 EIL — Evidence Interrogation Loop
 
-The EIL is a ReAct agent that autonomously investigates a case given a high-level goal:
+El EIL es un agente ReAct que investiga un caso de forma autónoma dado un objetivo de alto nivel:
 
-```python
-nexus investigate lockbit_ir "How did the attacker get in?"
+```bash
+nexus investigate lockbit_ir "¿Cómo entró el atacante?"
 ```
 
-**Tools available to the agent:**
-- `threat_hunt()` — MITRE ATT&CK detection (always first)
-- `pivot_user(username)` — all activity for a user
-- `pivot_ip(ip)` — all events for an IP
-- `pivot_process(name)` — all events for a process
-- `sql_query(question)` — NL→SQL for arbitrary queries
-- `done(narrative)` — conclude with incident summary
+**Herramientas disponibles para el agente:**
+- `threat_hunt()` — detección MITRE ATT&CK (siempre primero)
+- `pivot_user(usuario)` — toda la actividad de un usuario
+- `pivot_ip(ip)` — todos los eventos de una IP
+- `pivot_process(nombre)` — todos los eventos de un proceso
+- `sql_query(pregunta)` — NL→SQL para consultas arbitrarias
+- `done(narrativa)` — concluir con resumen del incidente
 
-**Loop mechanics**: The agent receives the real case data (top users, IPs, event IDs) as context before the first step, preventing hallucinated pivot values. A sliding context window (last 6 turns) prevents token overflow. Loop detection redirects repeated tool calls. The final step forces a `done()` call if the agent has not concluded.
+**Mecánica del loop**: El agente recibe los datos reales del caso (usuarios principales, IPs, event IDs) como contexto antes del primer paso, previniendo valores de pivote alucinados. Una ventana de contexto deslizante (últimos 6 turnos) previene el desbordamiento de tokens. La detección de loops redirige llamadas repetidas a herramientas. El paso final fuerza una llamada `done()` si el agente no ha concluido.
 
 ---
 
-## 4. Evaluation
+## 4. Evaluación
 
-### 4.1 Benchmark Suite
+### 4.1 Suite de Benchmark
 
-25 questions spanning 10 forensic categories, with hand-crafted ground-truth SQL:
+25 preguntas en 10 categorías forenses, con SQL de referencia construido manualmente:
 
-| Category | Questions | Coverage |
+| Categoría | Preguntas | Cobertura |
 |---|---|---|
-| Enumeration | 5 | Users, computers, event counts |
-| Timeline | 4 | Date ranges, chronological ordering |
-| Network | 4 | Connections, external IPs, active sessions |
-| Anomaly | 3 | Off-hours activity, suspicious paths, brute force |
-| Persistence | 2 | Scheduled tasks, registry autoruns |
-| Processes | 2 | SYSTEM processes, PID analysis |
-| User activity | 2 | Logon patterns, nocturnal access |
-| Cross-table | 1 | JOIN: processes + network connections |
-| Attribution | 1 | Top process by connection count |
-| Meta | 1 | Evidence manifest summary |
+| Enumeración | 5 | Usuarios, equipos, conteos de eventos |
+| Línea de tiempo | 4 | Rangos de fecha, orden cronológico |
+| Red | 4 | Conexiones, IPs externas, sesiones activas |
+| Anomalía | 3 | Actividad fuera de horario, rutas sospechosas, fuerza bruta |
+| Persistencia | 2 | Tareas programadas, autoruns de registro |
+| Procesos | 2 | Procesos SYSTEM, análisis de PID |
+| Actividad de usuario | 2 | Patrones de logon, acceso nocturno |
+| Cruce de tablas | 1 | JOIN: procesos + conexiones de red |
+| Atribución | 1 | Proceso con más conexiones externas |
+| Meta | 1 | Resumen del manifiesto de evidencia |
 
-### 4.2 Metrics
+### 4.2 Métricas
 
-**Score**: Pass rate — SQL executes, uses correct tables and columns, returns expected row range.
+**Score**: Tasa de éxito — SQL ejecuta, usa tablas y columnas correctas, devuelve rango de filas esperado.
 
-**Hallucination Rate (HR)**: Questions with at least one unresolved hallucination / total.
+**Tasa de Alucinación (HR)**: Preguntas con al menos una alucinación no resuelta / total.
 
-**Self-Correction Rate (SCR)**: Auto-corrected hallucinations / total detected hallucinations.
+**Tasa de Autocorrección (SCR)**: Alucinaciones corregidas automáticamente / total detectadas.
 
-**Token Utilization Score (TUS)**: `1 - (output_tokens / max_tokens)` — higher = more efficient, less padding.
+**Token Utilization Score (TUS)**: `1 - (tokens_salida / max_tokens)` — mayor = más eficiente, menos relleno.
 
-**Reliability Score (RS)**: `Score × (1 - HR) × (1 + SCR × 0.1)` — composite metric.
+**Reliability Score (RS)**: `Score × (1 - HR) × (1 + SCR × 0.1)` — métrica compuesta.
 
-**Context Recall Rate (CCR)**: ROUGE-1 recall of generated SQL vs ground-truth SQL.
+**Context Recall Rate (CCR)**: ROUGE-1 recall del SQL generado vs SQL de referencia.
 
-### 4.3 Benchmark Progression
+### 4.3 Progresión del Benchmark
 
-| Round | Date | Score | HR | SCR | TUS | RS | CCR | Notes |
+| Ronda | Fecha | Score | HR | SCR | TUS | RS | CCR | Notas |
 |---|---|---|---|---|---|---|---|---|
-| R1 | 2026-06-05 | 80% | 20% | — | — | — | — | Baseline |
-| R2 | 2026-06-05 | 90% | 10% | — | — | — | — | Schema docs + Q-SQL pairs |
-| R3 | 2026-06-05 | 90% | 10% | — | — | — | — | Syntax validator |
-| R4 | 2026-06-06 | 92% | 12% | 40% | 0.983 | 0.920 | 0.550 | 25Q, FindingValidator |
-| R5 | 2026-06-06 | — | — | — | — | — | — | Router + intent detection |
-| R6 | 2026-06-07 | 96% | 4% | 100% | 0.950 | 0.960 | 0.810 | DFIR analyst Q-SQL pairs |
-| R7 | 2026-06-09 | 88% | 8% | 33% | 0.995 | 0.880 | 0.963 | EIL agent added |
-| **R8** | **2026-06-09** | **100%** | **0%** | **100%** | **1.000** | **1.000** | **0.990** | **B07/B08/B23 fixes** |
+| R1 | 2026-06-05 | 80% | 20% | — | — | — | — | Línea base |
+| R2 | 2026-06-05 | 90% | 10% | — | — | — | — | Docs de esquema + pares P-SQL |
+| R3 | 2026-06-05 | 90% | 10% | — | — | — | — | Validador sintáctico |
+| R4 | 2026-06-06 | 92% | 12% | 40% | 0.983 | 0.920 | 0.550 | 25 preguntas, FindingValidator |
+| R5 | 2026-06-06 | — | — | — | — | — | — | Router + detección de intención |
+| R6 | 2026-06-07 | 96% | 4% | 100% | 0.950 | 0.960 | 0.810 | Pares P-SQL de analista DFIR |
+| R7 | 2026-06-09 | 88% | 8% | 33% | 0.995 | 0.880 | 0.963 | Agente EIL añadido |
+| **R8** | **2026-06-09** | **100%** | **0%** | **100%** | **1.000** | **1.000** | **0.990** | **Correcciones B07/B08/B23** |
 
-**Hardware**: Intel CPU, no GPU. Average query latency R8: 65.3s, p95: 149.0s.
+**Hardware**: CPU Intel, sin GPU. Latencia promedio por consulta en R8: 65.3s, p95: 149.0s.
 
-### 4.4 Analyst Validation — 12 Cases
+### 4.4 Validación por Analista — 12 Casos
 
-Beyond the benchmark, each of 12 evidence cases was tested with a representative DFIR analyst question:
+Más allá del benchmark, cada uno de los 12 casos de evidencia fue evaluado con una pregunta representativa de analista DFIR:
 
-| Case | Evidence | Question | Result |
+| Caso | Evidencia | Pregunta | Resultado |
 |---|---|---|---|
-| lockbit_ir | 39,949 events | Successful logon accounts + source IPs | CLEAN |
-| mitre_attacks | 63,171 events | Source IPs with most failed logons | CLEAN |
-| credential_access | 29,853 events | IPs with brute force attempts | CLEAN |
-| lateral_movement | 1,288 events | Network shares accessed by account | CLEAN |
-| privilege_escalation | 1,142 events | Accounts with special privileges | CORRECTED |
-| c2 | 1,969 events | Processes with external connections | CLEAN |
-| other_ttps | 750 events | PowerShell scripts executed | CLEAN |
-| automated_testing | 800 events | Defender detections | CLEAN |
-| execution | 541 events | Process creation with commands | CLEAN |
-| defense_evasion | 431 events | Event log clearing | CLEAN |
-| persistence | 411 events | Directory Service modifications | CLEAN |
-| discovery | 163 events | User/group enumeration | CLEAN |
+| lockbit_ir | 39,949 eventos | Cuentas con logon exitoso + IPs de origen | LIMPIO |
+| mitre_attacks | 63,171 eventos | IPs con más intentos de logon fallido | LIMPIO |
+| credential_access | 29,853 eventos | IPs con intentos de fuerza bruta | LIMPIO |
+| lateral_movement | 1,288 eventos | Recursos compartidos accedidos por cuenta | LIMPIO |
+| privilege_escalation | 1,142 eventos | Cuentas con privilegios especiales | CORREGIDO |
+| c2 | 1,969 eventos | Procesos con conexiones externas | LIMPIO |
+| other_ttps | 750 eventos | Scripts PowerShell ejecutados | LIMPIO |
+| automated_testing | 800 eventos | Detecciones de Defender | LIMPIO |
+| execution | 541 eventos | Creación de procesos con comandos | LIMPIO |
+| defense_evasion | 431 eventos | Borrado de registros de eventos | LIMPIO |
+| persistence | 411 eventos | Modificaciones de Directory Service | LIMPIO |
+| discovery | 163 eventos | Enumeración de usuarios/grupos | LIMPIO |
 
-**Result**: 12/12 PASS, 11/12 CLEAN (92%), 1/12 CORRECTED (auto-resolved by validator).
+**Resultado**: 12/12 APROBADOS, 11/12 LIMPIOS (92%), 1/12 CORREGIDO (resuelto automáticamente por el validador).
 
-### 4.5 Kill Chain Reconstruction — 63K Events
+### 4.5 Reconstrucción de Kill Chain — 63K Eventos
 
-Using `mitre_attacks` (148 EVTX files, 63,171 events, all ATT&CK phases), we reconstructed the full incident kill chain using only NL→SQL — no hardcoded rules:
+Usando `mitre_attacks` (148 archivos EVTX, 63,171 eventos, todas las fases ATT&CK), reconstruimos la kill chain completa del incidente usando solo NL→SQL — sin reglas hardcodeadas:
 
-| Phase | Question | Result |
+| Fase | Pregunta | Resultado |
 |---|---|---|
-| SCOPE | What machines were involved? | CLEAN |
-| INITIAL ACCESS | First credential attacks against the environment | CLEAN |
-| INITIAL ACCESS | Attack progression: failed → successful logons from same IP | CLEAN |
-| LATERAL MOVEMENT | Accounts moving between machines | CLEAN |
-| PRIVILEGE ESCALATION | Accounts receiving special privileges | CLEAN |
-| PERSISTENCE | Persistence mechanisms established | CLEAN |
-| DEFENSE EVASION | Defense evasion actions taken | CLEAN |
-| EXECUTION | Processes and commands executed | CLEAN |
-| ACTOR | User account appearing across most attack phases | CLEAN |
-| TIMELINE | Full incident timeline ordered by time | CLEAN |
+| ALCANCE | ¿Qué máquinas estuvieron involucradas? | LIMPIO |
+| ACCESO INICIAL | Primeros ataques de credenciales contra el entorno | LIMPIO |
+| ACCESO INICIAL | Progresión del ataque: logons fallidos → exitosos desde la misma IP | LIMPIO |
+| MOVIMIENTO LATERAL | Cuentas que se movieron entre máquinas | LIMPIO |
+| ESCALACIÓN DE PRIVILEGIOS | Cuentas que recibieron privilegios especiales | LIMPIO |
+| PERSISTENCIA | Mecanismos de persistencia establecidos | LIMPIO |
+| EVASIÓN DE DEFENSA | Acciones de evasión de defensa tomadas | LIMPIO |
+| EJECUCIÓN | Procesos y comandos ejecutados | LIMPIO |
+| ATRIBUCIÓN | Cuenta de usuario presente en más fases del ataque | LIMPIO |
+| LÍNEA DE TIEMPO | Cronología completa del incidente ordenada por tiempo | LIMPIO |
 
-**10/10 CLEAN.** Key findings: `Administrator` account covered 11 attack phases; execution chain `hh.exe → cmd.exe → rundll32.exe`; 22 log clearing events during evasion phase.
+**10/10 LIMPIOS.** Hallazgos clave: cuenta `Administrator` cubrió 11 fases del ataque; cadena de ejecución `hh.exe → cmd.exe → rundll32.exe`; 22 eventos de borrado de logs durante la fase de evasión.
 
 ---
 
-## 5. Evidence Corpus
+## 5. Corpus de Evidencia
 
-| Dataset | Cases | Events | Source |
+| Dataset | Casos | Eventos | Fuente |
 |---|---|---|---|
-| LockBit Ransomware IR | 1 | 39,949 | Real incident response (anonymized) |
+| IR de Ransomware LockBit | 1 | 39,949 | Respuesta a incidente real (anonimizado) |
 | sbousseaden EVTX-ATTACK-SAMPLES | 10 | 98,000+ | github.com/sbousseaden |
-| mitre_attacks (combined) | 1 | 63,171 | All 10 ATT&CK categories merged |
-| mdecrevoisier APT steps | 12 | 3,609 | github.com/mdecrevoisier |
-| FOR563 RDP lab | 1 | 1,800 | SANS FOR563 exercise |
+| mitre_attacks (combinado) | 1 | 63,171 | Las 10 categorías ATT&CK fusionadas |
+| mdecrevoisier pasos APT | 12 | 3,609 | github.com/mdecrevoisier |
+| Lab RDP FOR563 | 1 | 1,800 | Ejercicio SANS FOR563 |
 | **Total** | **27** | **~207,000** | |
 
 ---
 
-## 6. Implementation
+## 6. Implementación
 
-### 6.1 Dependencies
+### 6.1 Dependencias
 
 ```
-python-evtx     ← EVTX parsing
-pandas          ← DataFrame output
-openai          ← Ollama-compatible client
-httpx           ← Explicit timeout control
-sqlite3         ← Standard library, zero install
+python-evtx     ← Parseo de EVTX
+pandas          ← Salida en DataFrame
+openai          ← Cliente compatible con Ollama
+httpx           ← Control explícito de timeout
+sqlite3         ← Biblioteca estándar, sin instalación
 ```
 
-No vector database, no embedding model, no cloud API.
+Sin base de datos vectorial, sin modelo de embeddings, sin API en la nube.
 
-### 6.2 Installation
+### 6.2 Instalación
 
 ```bash
 git clone https://github.com/robdinovil/nexus-dfir
 cd nexus-dfir && pip install -e .
 ollama pull qwen2.5:7b-instruct
 
-nexus new mycase
-nexus ingest mycase /path/to/evidence/
-nexus ask mycase "¿Qué cuentas tuvieron logon exitoso?"
-nexus hunt mycase
-nexus investigate mycase "What happened in this incident?"
+nexus new micaso
+nexus ingest micaso /ruta/a/evidencia/
+nexus ask micaso "¿Qué cuentas tuvieron logon exitoso?"
+nexus hunt micaso
+nexus investigate micaso "¿Qué pasó en este incidente?"
 ```
 
-**System requirements**: Python 3.10+, Ollama ≥0.3, ~5GB RAM, no GPU required.
+**Requisitos del sistema**: Python 3.10+, Ollama ≥0.3, ~5GB RAM, sin GPU requerida.
 
 ---
 
-## 7. Limitations and Future Work
+## 7. Limitaciones y Trabajo Futuro
 
-**EIL agent maturity**: The ReAct agent reliably completes investigations but may waste steps on queries with hallucinated timestamps when evidence lacks temporal data. Improvement: inject timestamp availability into the case context.
+**Madurez del agente EIL**: El agente ReAct completa investigaciones de forma confiable, pero puede desperdiciar pasos en consultas con timestamps alucinados cuando la evidencia carece de datos temporales. Mejora: inyectar disponibilidad de timestamps en el contexto del caso.
 
-**Parser coverage**: Current parsers support EVTX, CSV (tasklist/schtasks/WMIC), netstat, registry exports, and systeminfo. PCAP (via tshark), MFT, prefetch, and browser history are planned.
+**Cobertura de parsers**: Los parsers actuales soportan EVTX, CSV (tasklist/schtasks/WMIC), netstat, exportaciones de registro y systeminfo. PCAP (vía tshark), MFT, prefetch e historial de navegador están planificados.
 
-**E01 forensic image support**: Currently requires pre-extracted artifacts. Integration with `ewfmount` + `pytsk3` would enable direct E01 ingestion.
+**Soporte de imágenes forenses E01**: Actualmente requiere artefactos pre-extraídos. La integración con `ewfmount` + `pytsk3` permitiría ingestión directa de E01.
 
-**Triage and Report agents**: A Triage Agent (fast classification using `qwen2.5:3b`) and a Report Agent (structured IR report generation) are planned to complete the multi-agent system.
+**Agentes Triage y Report**: Un Agente de Triage (clasificación rápida usando `qwen2.5:3b`) y un Agente de Reporte (generación de reporte IR estructurado) están planificados para completar el sistema multiagente.
 
-**Model dependency**: Results are specific to `qwen2.5:7b-instruct`. Performance may vary with other models. The few-shot approach is model-agnostic; larger models are expected to improve EIL reasoning quality.
-
----
-
-## 8. Conclusion
-
-Nexus demonstrates that 100% accuracy NL→SQL forensic querying is achievable on air-gapped, CPU-only hardware using a 7B parameter model. The key enablers are: (1) BM25 few-shot retrieval grounded in forensic-domain Q-SQL pairs, (2) a three-layer validator that detects and corrects hallucinations before they reach the analyst, and (3) case-specific training that adapts the pipeline to each evidence corpus.
-
-The Evidence Interrogation Loop extends this foundation to autonomous investigation — given a case and a goal, the system independently constructs the attack kill chain without analyst guidance. Together, these components address the core operational constraint of real incident response: rigorous analysis under air-gap conditions, at machine speed.
+**Dependencia del modelo**: Los resultados son específicos a `qwen2.5:7b-instruct`. El rendimiento puede variar con otros modelos. El enfoque few-shot es agnóstico al modelo; se espera que modelos más grandes mejoren la calidad de razonamiento del EIL.
 
 ---
 
-## References
+## 8. Conclusión
+
+Nexus demuestra que el análisis forense NL→SQL con 100% de precisión es alcanzable en hardware air-gapped sin GPU usando un modelo de 7B parámetros. Los factores habilitadores clave son: (1) recuperación few-shot BM25 fundamentada en pares P-SQL del dominio forense, (2) un validador de tres capas que detecta y corrige alucinaciones antes de que lleguen al analista, y (3) entrenamiento específico por caso que adapta el pipeline a cada corpus de evidencia.
+
+El Evidence Interrogation Loop extiende esta base hacia la investigación autónoma — dado un caso y un objetivo, el sistema construye independientemente la kill chain del ataque sin guía del analista. Juntos, estos componentes abordan la restricción operacional central de la respuesta real a incidentes: análisis riguroso bajo condiciones air-gap, a velocidad de máquina.
+
+---
+
+## Referencias
 
 1. Yao, S. et al. (2022). ReAct: Synergizing Reasoning and Acting in Language Models. *arXiv:2210.03629*
-2. MITRE Corporation. ATT&CK Framework v14. *attack.mitre.org*
+2. MITRE Corporation. Marco ATT&CK v14. *attack.mitre.org*
 3. Carrier, B. (2005). File System Forensic Analysis. Addison-Wesley.
 4. Qwen Team (2024). Qwen2.5 Technical Report. *arXiv:2412.15115*
 5. sbousseaden. EVTX-ATTACK-SAMPLES. *github.com/sbousseaden/EVTX-ATTACK-SAMPLES*
@@ -325,5 +325,5 @@ The Evidence Interrogation Loop extends this foundation to autonomous investigat
 
 ---
 
-*Nexus DFIR v0.2.0 — open source at github.com/robdinovil/nexus-dfir*  
-*Benchmark data, recordings, and reproducibility scripts included in repository*
+*Nexus DFIR v0.2.0 — código abierto en github.com/robdinovil/nexus-dfir*  
+*Datos de benchmark, grabaciones y scripts de reproducibilidad incluidos en el repositorio*
