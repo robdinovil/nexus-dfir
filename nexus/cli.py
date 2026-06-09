@@ -104,6 +104,22 @@ def main():
     elif cmd == "results":
         _cmd_results(parsed.args[0] if parsed.args else _die("nexus results <caso>"))
 
+    elif cmd == "triage":
+        ap = _sub_parser("triage")
+        ap.add_argument("case")
+        ap.add_argument("--model", default="qwen2.5:3b-instruct")
+        a = ap.parse_args(parsed.args)
+        _cmd_triage(a.case, a.model)
+
+    elif cmd == "report":
+        ap = _sub_parser("report")
+        ap.add_argument("case")
+        ap.add_argument("--eil", default="", help="Conclusión del EIL (opcional)")
+        ap.add_argument("--triage", default="", help="Path a triage JSON (opcional)")
+        ap.add_argument("--model", default=DEFAULT_MODEL)
+        a = ap.parse_args(parsed.args)
+        _cmd_report(a.case, a.eil, a.triage, a.model)
+
     elif cmd == "test":
         _cmd_test()
 
@@ -401,6 +417,30 @@ def _cmd_hunt(case_ref: str):
     router.close()
 
 
+def _cmd_triage(case_ref: str, model: str):
+    from .agents.triage import triage
+    case = _resolve(case_ref)
+    triage(
+        case_name=case.name,
+        db_path=case.db_path,
+        case_dir=str(case.path),
+        model=model,
+    )
+
+
+def _cmd_report(case_ref: str, eil_conclusion: str, triage_json: str, model: str):
+    from .agents.report import report
+    case = _resolve(case_ref)
+    report(
+        case_name=case.name,
+        db_path=case.db_path,
+        case_dir=str(case.path),
+        eil_conclusion=eil_conclusion,
+        triage_json=triage_json,
+        model=model,
+    )
+
+
 def _cmd_investigate(case_ref: str, goal: str, model: str, max_steps: int):
     from .agents.eil import investigate
     case = _resolve(case_ref)
@@ -550,14 +590,24 @@ def _print_header():
 def _print_help():
     print(f"""
 {BOLD}Uso:{RESET}
-  nexus                     modo conversacional (recomendado)
-  nexus <caso>              abrir caso directamente
-  nexus ingest <caso> <dir> ingestar desde script
-  nexus ask <caso> "..."    pregunta desde script
-  nexus benchmark <caso>    scorecard NL→SQL (guarda JSON en el caso)
-  nexus results <caso>      ver último resultado con TUS/RS/CCR por pregunta
-  nexus test                correr unit tests + cobertura
-  nexus cases               listar casos
+  nexus                        modo conversacional (recomendado)
+  nexus <caso>                 abrir caso directamente
+  nexus ingest <caso> <dir>    ingestar desde script
+  nexus ask <caso> "..."       pregunta NL→SQL
+  nexus hunt <caso>            reglas MITRE ATT&CK (sin LLM)
+  nexus triage <caso>          triage rápido — severidad + fase + IOCs (3b)
+  nexus investigate <caso> "." investigación autónoma ReAct (EIL)
+  nexus report <caso>          genera IR report DOCX (NIST 800-61)
+  nexus benchmark <caso>       scorecard NL→SQL (guarda JSON en el caso)
+  nexus results <caso>         ver último resultado con TUS/RS/CCR
+  nexus test                   correr unit tests + cobertura
+  nexus cases                  listar casos
+
+{BOLD}Flujo recomendado:{RESET}
+  nexus ingest <caso> <evidencia>
+  nexus triage <caso>                        ← primer vistazo (~90s)
+  nexus investigate <caso> "¿Qué pasó?"     ← investigación autónoma
+  nexus report <caso>                        ← genera DOCX + copia a Kalishares
 
 {BOLD}Dentro del chat:{RESET}
   <nombre-caso>             cargar caso
