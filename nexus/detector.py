@@ -177,6 +177,21 @@ def _detect_by_content(path: Path, encoding: str, text: str, raw: bytes) -> Evid
         return EvidenceFile(path=path, evidence_type=ctype, encoding=encoding,
                             confidence="high", parser=parser, description=desc)
 
+    # Zeek logs (conn.log / dns.log) — detectar antes de netstat por el header #fields
+    if "#separator" in text_lower and "#fields" in text_lower:
+        if "id.orig_h" in text_lower or "id.resp_h" in text_lower:
+            return EvidenceFile(path=path, evidence_type="zeek_conn", encoding=encoding,
+                                confidence="high", parser="zeek_conn_parser",
+                                description="Zeek conn.log (network connections)")
+        if "qtype_name" in text_lower or "query" in text_lower:
+            return EvidenceFile(path=path, evidence_type="zeek_dns", encoding=encoding,
+                                confidence="high", parser="zeek_dns_parser",
+                                description="Zeek dns.log (DNS queries)")
+        # Generic Zeek log — best effort conn parser
+        return EvidenceFile(path=path, evidence_type="zeek_conn", encoding=encoding,
+                            confidence="medium", parser="zeek_conn_parser",
+                            description="Zeek log (tipo no identificado, intentando conn parser)")
+
     # Netstat
     if any(k in text_lower for k in ["conexiones activas", "active connections", "proto", "tcp", "udp"]) and \
        any(k in text_lower for k in ["listening", "established", "time_wait", "escuchando"]):

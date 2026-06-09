@@ -122,6 +122,27 @@ from .qa_corpus import GENERIC_QA, TACTIC_QA, TECHNIQUE_QA, PROCEDURE_QA
 # Appended below in the TABLE_DOCS dict — loaded separately
 
 
+_RE_SIMPLE_Q = re.compile(
+    r'\b(how many|count|list all|distinct|cuántos|cuantos|lista|qué usuarios|'
+    r'qué equipos|total de|muéstrame|muestra todos|show me|listar)\b',
+    re.IGNORECASE,
+)
+_RE_COMPLEX_Q = re.compile(
+    r'\b(correlat|timeline|lateral|kill chain|pivot|brute force|credential|'
+    r'dump|también|also|asimismo|relaciona|relacionado)\b',
+    re.IGNORECASE,
+)
+
+
+def _select_model(question: str, default_model: str) -> str:
+    """Usa 3b para queries simples (count/list) — 2-3x más rápido."""
+    if _RE_COMPLEX_Q.search(question):
+        return default_model
+    if len(question) < 80 and _RE_SIMPLE_Q.search(question):
+        return default_model.replace("7b", "3b")
+    return default_model
+
+
 class NexusAnalyst:
     def __init__(self, db_path: str, model: str = "qwen2.5:7b-instruct",
                  ollama_url: str = "http://localhost:11434", store_path: str = None):
@@ -139,6 +160,9 @@ class NexusAnalyst:
 
         from .vectorstore import NexusVectorStore
         self._store = NexusVectorStore(self.store_path)
+
+        self._prompt_base_cache: str | None = None
+        self._session_history: list[dict] = []
 
     def _detect_active_tables(self) -> list[str]:
         active = []
@@ -299,6 +323,29 @@ class NexusAnalyst:
                     return False
         return True
 
+    def _get_prompt_base(self) -> str:
+        """Schema + reglas de sistema — cacheado por sesión (mismo para todas las queries)."""
+        if self._prompt_base_cache is not None:
+            return self._prompt_base_cache
+        parts = [
+            "You are an expert DFIR analyst and SQLite query generator.",
+            "Rules:",
+            "- Generate ONLY a valid SQLite SELECT query. No explanation, no markdown, no comments.",
+            "- ONLY use columns that exist in the schema shown below. NEVER invent columns.",
+            "- ONLY use event_id values listed in the CONTEXT section. NEVER use other event_ids.",
+            "- ALWAYS include WHERE clauses when the question mentions filters (external, established, failed, suspicious).",
+            "- External IPs: NOT LIKE '10.%' AND NOT LIKE '192.168.%' AND NOT LIKE '127.%'",
+            "- Follow the examples exactly — preserve all WHERE conditions from similar examples.",
+            "",
+        ]
+        ddls = self._store.get_all_ddl()
+        if ddls:
+            parts.append("=== DATABASE SCHEMA ===")
+            parts.extend(ddls[:10])
+            parts.append("")
+        self._prompt_base_cache = "\n".join(parts)
+        return self._prompt_base_cache
+
     def ask(self, question: str, verbose: bool = True) -> dict:
         """Pregunta en lenguaje natural. Genera SQL, valida, y ejecuta con retry."""
         from .validator import validate, build_correction_hint
@@ -307,8 +354,9 @@ class NexusAnalyst:
             print(f"\n  {BOLD}Pregunta:{RESET} {question}")
 
         t0 = time.time()
+        effective_model = _select_model(question, self.model)
         prompt = self._build_prompt(question)
-        sql = _clean_sql(self._call_llm(prompt))
+        sql = _clean_sql(self._call_llm(prompt, model=effective_model))
         sql = _enforce_limit(sql)
 
         if not sql:
@@ -370,6 +418,14 @@ class NexusAnalyst:
             self._audit(question, sql, success=1, row_count=len(df),
                         hallucination=validation.hallucination_type,
                         autocorrected=int(self_corrected), latency_s=latency)
+            # Actualizar historial de sesión (últimas 3 Q&A para contexto conversacional)
+            summary = df.head(2).to_string(index=False)[:200] if len(df) > 0 else "(empty)"
+            self._session_history.append({
+                "question": question[:100],
+                "row_count": len(df),
+                "summary": summary,
+            })
+            self._session_history = self._session_history[-3:]
             return {
                 "question": question, "sql": sql, "result": df, "error": None,
                 "hallucination": validation.hallucination_type,
@@ -393,27 +449,10 @@ class NexusAnalyst:
             }
 
     def _build_prompt(self, question: str) -> str:
-        """Construye el prompt con schema + docs + few-shot examples + pregunta."""
-        parts = [
-            "You are an expert DFIR analyst and SQLite query generator.",
-            "Rules:",
-            "- Generate ONLY a valid SQLite SELECT query. No explanation, no markdown, no comments.",
-            "- ONLY use columns that exist in the schema shown below. NEVER invent columns.",
-            "- ONLY use event_id values listed in the CONTEXT section. NEVER use other event_ids.",
-            "- ALWAYS include WHERE clauses when the question mentions filters (external, established, failed, suspicious).",
-            "- External IPs: NOT LIKE '10.%' AND NOT LIKE '192.168.%' AND NOT LIKE '127.%'",
-            "- Follow the examples exactly — preserve all WHERE conditions from similar examples.",
-            "",
-        ]
+        """Schema cacheado + docs BM25 por query + historial de sesión + few-shot + pregunta."""
+        parts = [self._get_prompt_base()]
 
-        # Schema
-        ddls = self._store.get_all_ddl()
-        if ddls:
-            parts.append("=== DATABASE SCHEMA ===")
-            parts.extend(ddls[:10])
-            parts.append("")
-
-        # Docs más relevantes (top 5 por BM25)
+        # Docs más relevantes (top 5 por BM25) — varía por pregunta
         all_docs = self._store.get_all_docs()
         if all_docs:
             relevant_docs = _bm25_top_k(question, all_docs, k=5)
@@ -421,6 +460,14 @@ class NexusAnalyst:
                 parts.append("=== CONTEXT ===")
                 parts.extend(relevant_docs)
                 parts.append("")
+
+        # Contexto conversacional de la sesión (últimas 2 preguntas)
+        if self._session_history:
+            parts.append("=== SESSION CONTEXT (previous questions this session) ===")
+            for h in self._session_history[-2:]:
+                parts.append(f"Q: {h['question']}")
+                parts.append(f"Result: {h['row_count']} rows. {h['summary']}")
+            parts.append("")
 
         # Few-shot Q-SQL
         examples = self._store.get_similar_qa(question, top_k=3)
@@ -434,23 +481,37 @@ class NexusAnalyst:
         parts.append(f"=== QUESTION ===\n{question}\n\nSQL:")
         return "\n".join(parts)
 
-    def _call_llm(self, prompt: str, max_tokens: int = 256) -> str:
-        """Llama al LLM via Ollama API compatible con OpenAI."""
+    def _call_llm(self, prompt: str, max_tokens: int = 256, model: str = None) -> str:
+        """Llama al LLM via Ollama. Fallback automático a 3b si 7b timeout."""
         import httpx
         from openai import OpenAI
+        effective_model = model or self.model
         client = OpenAI(
             base_url=f"{self.ollama_url}/v1",
             api_key="ollama",
             timeout=httpx.Timeout(connect=10.0, read=600.0, write=10.0, pool=5.0),
             max_retries=0,
         )
-        resp = client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.0,
-            max_tokens=max_tokens,
-        )
-        return resp.choices[0].message.content or ""
+        try:
+            resp = client.chat.completions.create(
+                model=effective_model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.0,
+                max_tokens=max_tokens,
+            )
+            return resp.choices[0].message.content or ""
+        except Exception as e:
+            err = str(e).lower()
+            if "7b" in effective_model and ("timeout" in err or "read" in err or "connection" in err):
+                fallback = effective_model.replace("7b", "3b")
+                resp = client.chat.completions.create(
+                    model=fallback,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.0,
+                    max_tokens=max_tokens,
+                )
+                return resp.choices[0].message.content or ""
+            raise
 
     def ask_with_explanation(self, question: str, verbose: bool = True) -> dict:
         """NL→SQL + interpretación forense del analista sobre los resultados."""

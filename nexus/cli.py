@@ -122,6 +122,11 @@ def main():
         a = ap.parse_args(parsed.args)
         _cmd_report(a.case, a.eil, a.triage, a.model, fmt=a.fmt)
 
+    elif cmd == "search":
+        if not parsed.args:
+            _die("nexus search <indicador>")
+        _cmd_search(parsed.args[0])
+
     elif cmd == "test":
         _cmd_test()
 
@@ -485,6 +490,12 @@ def _cmd_test():
     sys.exit(result.returncode)
 
 
+def _cmd_search(indicator: str):
+    from .search import search_ioc, print_search_results
+    results = search_ioc(indicator)
+    print_search_results(indicator, results)
+
+
 def _cmd_benchmark(case_ref: str, model: str):
     from .benchmark import run
     from datetime import datetime
@@ -601,6 +612,7 @@ def _print_help():
   nexus triage <caso>          triage rápido — severidad + fase + IOCs (3b)
   nexus investigate <caso> "." investigación autónoma ReAct (EIL)
   nexus report <caso>          genera IR report DOCX (NIST 800-61)
+  nexus search <indicador>      buscar IP/hash/usuario en TODOS los casos
   nexus benchmark <caso>       scorecard NL→SQL (guarda JSON en el caso)
   nexus results <caso>         ver último resultado con TUS/RS/CCR
   nexus test                   correr unit tests + cobertura

@@ -5,6 +5,7 @@ ReAct agent que investiga un caso DFIR de forma autónoma.
 Ciclo: THINK → ACT (tool) → OBSERVE → repeat → CONCLUSION
 """
 
+import json
 import re
 import sqlite3
 import time
@@ -64,6 +65,42 @@ def _llm_call(model: str, messages: list[dict], max_tokens: int = 256) -> str:
         max_tokens=max_tokens,
     )
     return resp.choices[0].message.content or ""
+
+
+_STRUCT_PROMPT = """\
+Given this incident narrative, extract structured data as JSON.
+
+NARRATIVE:
+{narrative}
+
+Output ONLY a JSON object:
+{{
+  "iocs": {{
+    "ips": ["attacker IPs mentioned"],
+    "accounts": ["attacker accounts mentioned"],
+    "processes": ["malicious processes mentioned"]
+  }},
+  "mitre_techniques": ["ATT&CK technique IDs, e.g. T1059.001"],
+  "attack_phase": "initial_access|execution|persistence|privilege_escalation|credential_access|lateral_movement|impact",
+  "confidence": 0.85,
+  "timeline_span": "e.g. 2023-01-15 to 2023-01-18 or unknown"
+}}
+No explanation. ONLY the JSON object.
+"""
+
+
+def _extract_structured(narrative: str, model: str) -> dict:
+    """Segunda llamada LLM para extraer IOCs y técnicas MITRE estructuradas."""
+    prompt = _STRUCT_PROMPT.format(narrative=narrative)
+    try:
+        raw = _llm_call(model, [{"role": "user", "content": prompt}], max_tokens=400)
+        raw = re.sub(r"```json\s*|\s*```", "", raw).strip()
+        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        if m:
+            return json.loads(m.group(0))
+    except Exception:
+        pass
+    return {}
 
 
 def _parse_action(text: str) -> tuple[str, str] | None:
@@ -407,12 +444,24 @@ def investigate(
         _print(f"  {YELLOW}[EIL] Sin conclusión tras {max_steps} steps.{RESET}")
         conclusion = "Investigation incomplete."
 
+    # Extraer IOCs y técnicas MITRE estructuradas de la narrativa
+    structured = {}
+    if conclusion and conclusion != "Investigation incomplete.":
+        _print(f"  {DIM}[EIL] Extrayendo IOCs y técnicas MITRE...{RESET}")
+        structured = _extract_structured(conclusion, model)
+        if structured and verbose:
+            techs = ", ".join(structured.get("mitre_techniques", [])) or "—"
+            iocs  = structured.get("iocs", {})
+            ips   = ", ".join(iocs.get("ips", [])) or "—"
+            print(f"  {DIM}IOCs: {ips}  |  Técnicas: {techs}{RESET}")
+
     # Persistir conclusión en findings table
     try:
         conn.execute(
-            "INSERT INTO findings (case_name, agent, goal, conclusion, steps_used) "
-            "VALUES (?,?,?,?,?)",
-            (case_name, "EIL", goal, conclusion, step - 1)
+            "INSERT INTO findings (case_name, agent, goal, conclusion, steps_used, structured_json) "
+            "VALUES (?,?,?,?,?,?)",
+            (case_name, "EIL", goal, conclusion, step - 1,
+             json.dumps(structured, ensure_ascii=False) if structured else None)
         )
         conn.commit()
     except Exception:

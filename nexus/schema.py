@@ -134,13 +134,14 @@ CREATE TABLE IF NOT EXISTS audit_log (
 
 -- Conclusiones persistidas de agentes (EIL, triage)
 CREATE TABLE IF NOT EXISTS findings (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts          TEXT DEFAULT (datetime('now')),
-    case_name   TEXT,
-    agent       TEXT,
-    goal        TEXT,
-    conclusion  TEXT,
-    steps_used  INTEGER
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts              TEXT DEFAULT (datetime('now')),
+    case_name       TEXT,
+    agent           TEXT,
+    goal            TEXT,
+    conclusion      TEXT,
+    steps_used      INTEGER,
+    structured_json TEXT
 );
 
 -- Índices para queries forenses comunes
