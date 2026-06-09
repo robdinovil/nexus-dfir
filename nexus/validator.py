@@ -151,10 +151,12 @@ def _check_columns(sql: str, conn: sqlite3.Connection, tables: list[str]) -> lis
         "exists", "union", "all", "true", "false",
     }
 
-    # Encontrar patrones tipo "table.column" o standalone column en WHERE.
-    # \bLIKE\b etc. previene que el regex engine haga backtracking y encuentre
-    # substrings: e.g. 'command_line' → 'command_l' + 'IN' (falso positivo).
-    col_refs = re.findall(r"(?:WHERE|AND|OR|ON|,|\()\s+(?:\w+\.)?(\w+)\s*(?:=|!=|<|>|\bLIKE\b|\bIS\b|\bNOT\b|\bIN\b)", sql, re.IGNORECASE)
+    # Solo matches después de WHERE/AND/OR/ON — evita falsos positivos de
+    # argumentos de funciones (CAST, COUNT, COALESCE) y listas SELECT.
+    col_refs = re.findall(
+        r"\b(?:WHERE|AND|OR|ON)\s+(?:\w+\.)?(\w+)\s*(?:=|!=|<>|<=|>=|<|>|\bLIKE\b|\bIS\b|\bNOT\b|\bIN\b)",
+        sql, re.IGNORECASE
+    )
     for col in col_refs:
         col_lower = col.lower()
         if col_lower not in SQL_KEYWORDS and col_lower not in all_valid_cols:

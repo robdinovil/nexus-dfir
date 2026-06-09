@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS evidence_files (
     filepath      TEXT NOT NULL UNIQUE,
     evidence_type TEXT NOT NULL,
     file_size_kb  REAL,
+    sha256        TEXT,
     ingested_at   TEXT DEFAULT (datetime('now')),
     record_count  INTEGER DEFAULT 0
 );
@@ -115,6 +116,31 @@ CREATE TABLE IF NOT EXISTS sysinfo (
     ip_addresses    TEXT,
     hotfixes        TEXT,
     source_file     TEXT
+);
+
+-- Trazabilidad: log de cada query NL→SQL ejecutado
+CREATE TABLE IF NOT EXISTS audit_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts              TEXT DEFAULT (datetime('now')),
+    case_name       TEXT,
+    question        TEXT,
+    sql_generated   TEXT,
+    success         INTEGER,
+    row_count       INTEGER,
+    hallucination   TEXT,
+    autocorrected   INTEGER,
+    latency_s       REAL
+);
+
+-- Conclusiones persistidas de agentes (EIL, triage)
+CREATE TABLE IF NOT EXISTS findings (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          TEXT DEFAULT (datetime('now')),
+    case_name   TEXT,
+    agent       TEXT,
+    goal        TEXT,
+    conclusion  TEXT,
+    steps_used  INTEGER
 );
 
 -- Índices para queries forenses comunes

@@ -60,7 +60,8 @@ PHASE_LABEL = {
 
 def _collect_stats(conn: sqlite3.Connection) -> dict:
     """SQL puro — cero LLM. Base de verdad para el clasificador."""
-    s = {}
+    from nexus.stats import collect_basic_stats
+    s = collect_basic_stats(conn)
 
     def q(sql, params=()):
         try:
@@ -71,32 +72,6 @@ def _collect_stats(conn: sqlite3.Connection) -> dict:
     def q1(sql, params=()):
         rows = q(sql, params)
         return rows[0][0] if rows else 0
-
-    # Volumen
-    s["total_events"]    = q1("SELECT COUNT(*) FROM events")
-    s["unique_event_ids"]= q1("SELECT COUNT(DISTINCT event_id) FROM events")
-    s["unique_users"]    = q1("SELECT COUNT(DISTINCT username) FROM events WHERE username IS NOT NULL AND username != ''")
-    s["unique_ips"]      = q1("SELECT COUNT(DISTINCT source_ip) FROM events WHERE source_ip IS NOT NULL AND source_ip != ''")
-    s["unique_machines"] = q1("SELECT COUNT(DISTINCT computer) FROM events WHERE computer IS NOT NULL AND computer != ''")
-    s["processes"]       = q1("SELECT COUNT(*) FROM processes")
-    s["net_connections"] = q1("SELECT COUNT(*) FROM network_connections")
-    s["sched_tasks"]     = q1("SELECT COUNT(*) FROM scheduled_tasks")
-    s["registry_keys"]   = q1("SELECT COUNT(*) FROM registry_keys")
-
-    # Rango temporal
-    s["first_event"] = q1("SELECT MIN(timestamp_utc) FROM events WHERE timestamp_utc IS NOT NULL AND timestamp_utc != ''") or ""
-    s["last_event"]  = q1("SELECT MAX(timestamp_utc) FROM events WHERE timestamp_utc IS NOT NULL AND timestamp_utc != ''") or ""
-    dwell_days = 0
-    if s["first_event"] and s["last_event"] and s["first_event"] != s["last_event"]:
-        try:
-            from datetime import datetime as dt
-            fmt = "%Y-%m-%d %H:%M:%S"
-            t0 = dt.strptime(s["first_event"][:19], fmt)
-            t1 = dt.strptime(s["last_event"][:19], fmt)
-            dwell_days = (t1 - t0).days
-        except Exception:
-            pass
-    s["dwell_days"] = dwell_days
 
     # Top event IDs
     rows = q("SELECT event_id, COUNT(*) n FROM events GROUP BY event_id ORDER BY n DESC LIMIT 8")

@@ -76,7 +76,9 @@ _EID_NAMES = {
 # ── Fase 1: recolección determinista ─────────────────────────────────────────
 
 def _collect_data(conn: sqlite3.Connection, case_name: str) -> dict:
-    d = {"case_name": case_name}
+    from nexus.stats import collect_basic_stats
+    d = {"case_name": case_name, **collect_basic_stats(conn)}
+    d["reg_keys"] = d.pop("registry_keys", 0)  # report usa reg_keys como alias
 
     def q(sql, params=()):
         try:
@@ -87,31 +89,6 @@ def _collect_data(conn: sqlite3.Connection, case_name: str) -> dict:
     def q1(sql, params=()):
         rows = q(sql, params)
         return rows[0][0] if rows else 0
-
-    # Scope
-    d["total_events"]    = q1("SELECT COUNT(*) FROM events")
-    d["unique_users"]    = q1("SELECT COUNT(DISTINCT username) FROM events WHERE username IS NOT NULL AND username != ''")
-    d["unique_ips"]      = q1("SELECT COUNT(DISTINCT source_ip) FROM events WHERE source_ip IS NOT NULL AND source_ip != ''")
-    d["unique_machines"] = q1("SELECT COUNT(DISTINCT computer) FROM events WHERE computer IS NOT NULL AND computer != ''")
-    d["processes"]       = q1("SELECT COUNT(*) FROM processes")
-    d["net_connections"] = q1("SELECT COUNT(*) FROM network_connections")
-    d["sched_tasks"]     = q1("SELECT COUNT(*) FROM scheduled_tasks")
-    d["reg_keys"]        = q1("SELECT COUNT(*) FROM registry_keys")
-    d["evidence_files"]  = q1("SELECT COUNT(*) FROM evidence_files")
-
-    # Timeline
-    d["first_event"] = q1("SELECT MIN(timestamp_utc) FROM events WHERE timestamp_utc IS NOT NULL AND timestamp_utc != ''") or ""
-    d["last_event"]  = q1("SELECT MAX(timestamp_utc) FROM events WHERE timestamp_utc IS NOT NULL AND timestamp_utc != ''") or ""
-    d["has_timestamps"] = bool(d["first_event"])
-    d["dwell_days"] = 0
-    if d["has_timestamps"]:
-        try:
-            from datetime import datetime as dt
-            t0 = dt.fromisoformat(d["first_event"].replace(" ", "T")[:19])
-            t1 = dt.fromisoformat(d["last_event"].replace(" ", "T")[:19])
-            d["dwell_days"] = (t1 - t0).days
-        except Exception:
-            pass
 
     # Top event IDs con nombres
     rows = q("SELECT event_id, COUNT(*) n FROM events GROUP BY event_id ORDER BY n DESC LIMIT 15")
@@ -240,11 +217,6 @@ def _collect_data(conn: sqlite3.Connection, case_name: str) -> dict:
         {"file": r[0], "type": r[1], "size_kb": round(r[2] or 0, 1), "records": r[3] or 0}
         for r in rows
     ]
-
-    # Señales de brute force para gaps
-    d["brute_force_total"] = q1("SELECT COUNT(*) FROM events WHERE event_id IN (4625,4771,4776,18456)")
-    d["log_clearing"] = q1("SELECT COUNT(*) FROM events WHERE event_id IN (1102,104)")
-    d["lsass_access"]  = q1("SELECT COUNT(*) FROM events WHERE event_id = 10 AND description LIKE '%lsass%'")
 
     return d
 
@@ -608,6 +580,73 @@ def _build_docx(data: dict, exec_summary: str, recommendations: str, eil_conclus
 
 # ── Punto de entrada ──────────────────────────────────────────────────────────
 
+def _build_markdown(data: dict, exec_summary: str, recommendations: str,
+                    eil_conclusion: str, triage_result: dict) -> str:
+    """Genera el reporte IR completo en Markdown."""
+    now = datetime.now().strftime("%Y-%m-%d %H:%M UTC")
+    lines = [
+        f"# Reporte de Respuesta a Incidentes — {data['case_name']}",
+        f"**Generado**: {now} | **Herramienta**: Nexus DFIR v0.2.0 (air-gap, CPU-only)",
+        "",
+        "---",
+        "",
+        "## 1. Resumen Ejecutivo",
+        "",
+        exec_summary,
+        "",
+        "---",
+        "",
+        "## 2. Alcance del Incidente",
+        "",
+        f"| Métrica | Valor |",
+        f"|---|---|",
+        f"| Eventos totales | {data['total_events']:,} |",
+        f"| Usuarios únicos | {data['unique_users']} |",
+        f"| IPs únicas | {data['unique_ips']} |",
+        f"| Máquinas | {data['unique_machines']} |",
+        f"| Procesos | {data['processes']:,} |",
+        f"| Conexiones de red | {data['net_connections']:,} |",
+        f"| Tareas programadas | {data['sched_tasks']} |",
+        f"| Claves de registro | {data.get('reg_keys', 0)} |",
+    ]
+    if data.get("has_timestamps"):
+        lines += [
+            f"| Inicio del período | {data['first_event'][:19]} |",
+            f"| Fin del período | {data['last_event'][:19]} |",
+            f"| Dwell time | {data['dwell_days']} días |",
+        ]
+    lines += [""]
+
+    if data.get("mitre_hits"):
+        lines += ["---", "", "## 3. Análisis MITRE ATT&CK", "",
+                  "| Regla | Severidad | Hits | Confianza | Riesgo FP |",
+                  "|---|---|---|---|---|"]
+        for h in data["mitre_hits"]:
+            lines.append(f"| {h['rule_id']} — {h['name']} | {h['severity']} | {h['count']} | {h.get('confidence', 0):.2f} | {h.get('fp_risk', '?')} |")
+        lines.append("")
+
+    if data.get("external_ips"):
+        lines += ["---", "", "## 4. Indicadores de Compromiso", "", "### IPs Externas", ""]
+        for ip in data["external_ips"]:
+            lines.append(f"- `{ip['ip']}` — {ip['total']} eventos, {ip['logons_ok']} logons OK, {ip['logons_fail']} fallidos")
+        lines.append("")
+
+    if eil_conclusion:
+        lines += ["---", "", "## 5. Hallazgos Clave (EIL)", "", eil_conclusion, ""]
+
+    lines += ["---", "", "## 6. Recomendaciones", "", recommendations, ""]
+
+    triage_sev = triage_result.get("severity", "")
+    if triage_sev:
+        lines += ["---", "", "## 7. Clasificación de Triage", "",
+                  f"**Severidad**: {triage_sev}",
+                  f"**Fase**: {triage_result.get('attack_phase', '')}",
+                  ""]
+
+    lines += ["---", "", f"*Nexus DFIR — github.com/robdinovil/nexus-dfir*", ""]
+    return "\n".join(lines)
+
+
 def report(
     case_name: str,
     db_path: str,
@@ -615,10 +654,12 @@ def report(
     eil_conclusion: str = "",
     triage_json: str = "",
     model: str = REPORT_MODEL,
+    fmt: str = "docx",
     verbose: bool = True,
 ) -> str:
     """
-    Genera el reporte IR DOCX para un caso Nexus.
+    Genera el reporte IR para un caso Nexus.
+    fmt: 'docx' (default) | 'md' — formato de salida.
     Devuelve la ruta al archivo generado.
     """
     t0 = time.time()
@@ -661,14 +702,20 @@ def report(
     _print(f"  {DIM}[REPORT] Generando recomendaciones ({model})...{RESET}")
     recommendations = _llm_recommendations(context, model)
 
-    _print(f"  {DIM}[REPORT] Ensamblando DOCX...{RESET}")
-    doc = _build_docx(data, exec_summary, recommendations, eil_conclusion, triage_result)
-
-    # Guardar
     ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_name = f"IR_{case_name}_{ts_str}.docx"
-    out_path = Path(case_dir) / out_name
-    doc.save(str(out_path))
+
+    if fmt == "md":
+        _print(f"  {DIM}[REPORT] Ensamblando Markdown...{RESET}")
+        md_content = _build_markdown(data, exec_summary, recommendations, eil_conclusion, triage_result)
+        out_name = f"IR_{case_name}_{ts_str}.md"
+        out_path = Path(case_dir) / out_name
+        out_path.write_text(md_content, encoding="utf-8")
+    else:
+        _print(f"  {DIM}[REPORT] Ensamblando DOCX...{RESET}")
+        doc = _build_docx(data, exec_summary, recommendations, eil_conclusion, triage_result)
+        out_name = f"IR_{case_name}_{ts_str}.docx"
+        out_path = Path(case_dir) / out_name
+        doc.save(str(out_path))
 
     elapsed = time.time() - t0
 
@@ -677,8 +724,8 @@ def report(
 
     # Copiar a Kalishares si está montado
     if KALISHARES.exists():
-        ks_path = KALISHARES / out_name
         import shutil
+        ks_path = KALISHARES / out_name
         shutil.copy2(str(out_path), str(ks_path))
         _print(f"  {GREEN}  Copiado a Kalishares: {ks_path.name}{RESET}")
 

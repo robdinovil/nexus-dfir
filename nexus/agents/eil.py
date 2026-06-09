@@ -407,5 +407,16 @@ def investigate(
         _print(f"  {YELLOW}[EIL] Sin conclusión tras {max_steps} steps.{RESET}")
         conclusion = "Investigation incomplete."
 
+    # Persistir conclusión en findings table
+    try:
+        conn.execute(
+            "INSERT INTO findings (case_name, agent, goal, conclusion, steps_used) "
+            "VALUES (?,?,?,?,?)",
+            (case_name, "EIL", goal, conclusion, step - 1)
+        )
+        conn.commit()
+    except Exception:
+        pass
+
     conn.close()
     return conclusion

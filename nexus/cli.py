@@ -117,8 +117,10 @@ def main():
         ap.add_argument("--eil", default="", help="Conclusión del EIL (opcional)")
         ap.add_argument("--triage", default="", help="Path a triage JSON (opcional)")
         ap.add_argument("--model", default=DEFAULT_MODEL)
+        ap.add_argument("--format", dest="fmt", default="docx", choices=["docx", "md"],
+                        help="Formato de salida: docx (default) | md")
         a = ap.parse_args(parsed.args)
-        _cmd_report(a.case, a.eil, a.triage, a.model)
+        _cmd_report(a.case, a.eil, a.triage, a.model, fmt=a.fmt)
 
     elif cmd == "test":
         _cmd_test()
@@ -428,7 +430,7 @@ def _cmd_triage(case_ref: str, model: str):
     )
 
 
-def _cmd_report(case_ref: str, eil_conclusion: str, triage_json: str, model: str):
+def _cmd_report(case_ref: str, eil_conclusion: str, triage_json: str, model: str, fmt: str = "docx"):
     from .agents.report import report
     case = _resolve(case_ref)
     report(
@@ -438,6 +440,7 @@ def _cmd_report(case_ref: str, eil_conclusion: str, triage_json: str, model: str
         eil_conclusion=eil_conclusion,
         triage_json=triage_json,
         model=model,
+        fmt=fmt,
     )
 
 
