@@ -92,6 +92,15 @@ def main():
     elif cmd == "hunt":
         _cmd_hunt(parsed.args[0] if parsed.args else _die("nexus hunt <caso>"))
 
+    elif cmd == "investigate":
+        ap = _sub_parser("investigate")
+        ap.add_argument("case")
+        ap.add_argument("goal", nargs="?", default="Investigate this forensic case and determine what happened.")
+        ap.add_argument("--model", default=DEFAULT_MODEL)
+        ap.add_argument("--steps", type=int, default=10)
+        a = ap.parse_args(parsed.args)
+        _cmd_investigate(a.case, a.goal, a.model, a.steps)
+
     elif cmd == "results":
         _cmd_results(parsed.args[0] if parsed.args else _die("nexus results <caso>"))
 
@@ -390,6 +399,19 @@ def _cmd_hunt(case_ref: str):
     router = NexusRouter(case)
     router._run_threat_hunt()
     router.close()
+
+
+def _cmd_investigate(case_ref: str, goal: str, model: str, max_steps: int):
+    from .agents.eil import investigate
+    case = _resolve(case_ref)
+    investigate(
+        case_name=case.name,
+        db_path=case.db_path,
+        store_path=case.store_path,
+        goal=goal,
+        model=model,
+        max_steps=max_steps,
+    )
 
 
 def _cmd_shell(case_ref: str, model: str):
